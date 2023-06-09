@@ -1,0 +1,417 @@
+---
+title: "Analysis workflow for OMIM data"
+output: html_document
+---
+
+# Load packages
+
+```{r, message = FALSE, warning = FALSE}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(xlsx)
+require(RColorBrewer)
+require(ComplexHeatmap)
+require(circlize)
+require(digest)
+require(cluster)
+library(biomaRt)
+library(gridBase)
+library(VennDiagram)
+```
+
+# Download OMIM data
+
+- `mim2gene.txt`:A tab-delimited file linking MIM numbers with NCBI Gene IDs, Ensembl Gene IDs, and HGNC Approved Gene Symbols.
+- `genemap2.txt`: A tab-delimited file containing OMIM's Synopsis of the Human Gene Map including additional information such as genomic coordinates and inheritance.
+- `morbidmap.txt`: A tab-delimited file of OMIM's Synopsis of the Human Gene Map (same as `genemap2.txt` above) sorted alphabetically by disorder.
+- `mimTitles.txt`: A tab-delimited file of MIM numbers and titles.
+
+```{r, echo = FALSE, warning = FALSE}
+# Gene
+url1 <- "https://omim.org/static/omim/data/mim2gene.txt"
+desk1 <- "./download/mim2gene.txt"
+download.file(url1, desk1)
+
+# Titles
+url2 <- "https://data.omim.org/downloads/8hzpjq5NT3yy1wute8ClNg/mimTitles.txt"
+desk2 <- "./download/mimTitles.txt"
+download.file(url2, desk2)
+
+# genemap2
+url3 <- "https://data.omim.org/downloads/8hzpjq5NT3yy1wute8ClNg/genemap2.txt"
+desk3 <- "./download/genemap2.txt"
+download.file(url3, desk3)
+
+# morbidmap
+url4 <- "https://data.omim.org/downloads/8hzpjq5NT3yy1wute8ClNg/morbidmap.txt"
+desk4 <- "./download/morbidmap.txt"
+download.file(url4, desk4)
+```
+
+# Gene in many phenotypes (>=1)
+
+Each Phenotype is followed by its MIM number, if different from that
+of the locus/gene, and then followed by its phenotype mapping
+key in parentheses (explanation below).
+
+Phenotype Mapping key - Appears in parentheses after a disorder:
+
+- `1` - The disorder is placed on the map based on its association with a gene,
+but the underlying defect is not known.
+- `2` - The disorder has been placed on the map by linkage or other
+  statistical method; no mutation has been found.
+- `3` - The molecular basis for the disorder is known; a mutation has been
+  found in the gene.
+- `4` - A contiguous gene deletion or duplication syndrome, multiple genes
+  are deleted or duplicated causing the phenotype.
+
+Organize the `mobidmap.txt` file and save as `morbidmap_updated.txt`
+(get rid of `{}` in some items).
+
+```{r}
+gene_morbid <- read.table(
+  "download/morbidmap_updated.txt",
+  header = FALSE, sep = "\t", na.string = "NA", fill = TRUE, comment.char = "#"
+)
+colnames(gene_morbid) <- c("Phenotype", "Gene Symbols", "MIM Number", "Cyto Location")
+
+gene_morbid <- gene_morbid[-c(8534:8537), ] # To remove unnecessary rows
+gene_morbid$Phenotype <- gsub("\\?", "", gene_morbid$Phenotype)
+
+# Pick phenotype mapping key = 3, that is, the molecular basis for the disorder is known.
+for (i in 1:nrow(gene_morbid)) {
+  r <- as.character(gene_morbid$Phenotype)[i]
+  a <- regmatches(r, gregexpr("\\(.\\)$", r, perl = TRUE))[[1]]
+  gene_morbid$type[i] <- a
+}
+
+write.csv(gene_morbid, file = "genesinPhenotypes_all.csv")
+
+gene_known <- gene_morbid %>%
+  filter(type == "(3)") # 3 - The molecular basis for the disorder is known; a mutation has been found in the gene.
+
+write.csv(gene_known, file = "genesinPhenotypes_known.csv")
+
+# Pick those genes in epilepsy, epileptic, seizures, seizure
+list <- c(
+  "epilepsy", "epileptic",
+  "seizures", "seizure",
+  "Epilepsy", "Epileptic",
+  "Seizures", "Seizure"
+)
+epi <- vector()
+for (i in 1:nrow(gene_known)) {
+  gene0 <- gene_known$Phenotype[i]
+  a0 <- strsplit(as.character(gene0), split = ",")
+  a1 <- strsplit(as.character(a0[[1]]), split = "\\s+")
+  epi0 <- ifelse(unlist(a1) %in% list, "Keep", "Discard")
+  epi1 <- ifelse("Keep" %in% epi0, epi1 <- "Keep", epi1 <- "Discard")
+  epi <- append(epi, epi1)
+}
+
+gene_known <- data.frame(gene_known, epi)
+
+gene_known_epilepsy <- subset(gene_known, epi == "Keep")
+
+write.csv(gene_known_epilepsy, file = "gene_known_epilepsy.csv") # n = 282
+
+# Get the gene
+gene <- vector()
+for (i in 1:nrow(gene_known_epilepsy)) {
+  gene0 <- gene_known_epilepsy$Gene.Symbols[i]
+  a0 <- strsplit(as.character(gene0), split = ",")
+  a1 <- strsplit(unlist(a0), split = "\\s+")
+  gene <- append(gene, unlist(a1)[1])
+}
+g <- table(as.character(gene))
+gene <- unique(gene)
+
+write.table(gene, file = "genesinepilepsy.txt", sep = ",") # n = 247
+```
+
+# Separate genes based on phenotypes
+
+Separate genes based on phenotypes into 3 categories:
+Core epilepsy genes, DEE genes, seizure related genes (SR),
+and save the file as `gene_known_epilepsy_updated.xlsx`.
+
+```{r, warning=FALSE}
+rm(list = ls())
+
+# CEG
+epilepsy <- read.xlsx("genes_epilepsy_updated.xlsx", header = TRUE, sheetIndex = 2)
+epilepsy <- epilepsy[, -1]
+
+list_e <- vector()
+Cyto <- vector()
+for (i in 1:nrow(epilepsy)) {
+  gene <- epilepsy[i, 2]
+  if (!is.na(gene)) {
+    a <- strsplit(gene, ",")
+    b <- unlist(a)
+    b <- gsub(" ", "", b)
+    list_e <- append(list_e, b[1])
+    c <- epilepsy$Cyto.Location[i]
+    Cyto <- append(Cyto, c)
+  }
+}
+group <- rep("CEG", length(list_e))
+list_e <- data.frame(Group = group, Gene = list_e, Cyto = Cyto)
+write.table(list_e, file = "genelist_E.txt", sep = ",")
+
+# DEE
+DEE <- read.xlsx("genes_epilepsy_updated.xlsx", header = TRUE, sheetIndex = 3)
+DEE <- DEE[, -1]
+
+list_DEE <- vector()
+Cyto <- vector()
+for (i in 1:nrow(DEE)) {
+  gene <- DEE[i, 2]
+  if (!is.na(gene)) {
+    a <- strsplit(gene, ",")
+    b <- unlist(a)
+    b <- gsub(" ", "", b)
+    list_DEE <- append(list_DEE, b[1])
+    c <- DEE$Cyto.Location[i]
+    Cyto <- append(Cyto, c)
+  }
+}
+group <- rep("DEEG", length(list_DEE))
+list_DEE <- data.frame(Group = group, Gene = list_DEE, Cyto = Cyto)
+write.table(list_DEE, file = "genelist_DEE.txt", sep = ",")
+
+# SR
+SR <- read.xlsx("genes_epilepsy_updated.xlsx", header = TRUE, sheetIndex = 4)
+SR <- SR[, -1]
+
+list_SR <- vector()
+Cyto <- vector()
+for (i in 1:nrow(SR)) {
+  gene <- SR[i, 2]
+  if (!is.na(gene)) {
+    a <- strsplit(gene, ",")
+    b <- unlist(a)
+    b <- gsub(" ", "", b)
+    list_SR <- append(list_SR, b[1])
+    c <- SR$Cyto.Location[i]
+    Cyto <- append(Cyto, c)
+  }
+}
+
+group <- rep("SRG", length(list_SR))
+list_SR <- data.frame(Group = group, Gene = list_SR, Cyto = Cyto)
+write.table(list_SR, file = "genelist_SR.txt", sep = ",")
+
+# Get a complete list
+all1 <- rbind(list_e, list_DEE)
+all2 <- rbind(all1, list_SR)
+
+write.csv(all2, file = "genelist_all.csv")
+
+x <- read.csv("genelist_all.csv", stringsAsFactors = FALSE)
+
+# Fix genes with updated HGNC symbols
+# The list is from comparing `setdiff(bed$gene, loc$hgnc_symbol)`
+x[which(x$Gene == "MARCH6"), "Gene"] <- "MARCHF6"
+x[which(x$Gene == "ICK"), "Gene"] <- "CILK1"
+x[which(x$Gene == "ADPRHL2"), "Gene"] <- "ADPRS"
+
+write.csv(x, file = "genelist_all_updated.csv")
+```
+
+# Circos plot
+
+```{r, warning=FALSE}
+x <- read.csv("genelist_all_updated.csv", stringsAsFactors = FALSE)
+
+# Get all groups for each unique gene
+gene_unique <- unique(x$Gene)
+
+gene_lst <- vector("list", length(gene_unique))
+for (i in seq_along(gene_unique)) gene_lst[[i]] <- sort(unique(x[x$Gene == gene_unique[i], "Group"]))
+gene_lst <- lapply(gene_lst, function(x) paste(x, collapse = " & "))
+
+# Arrange levels in specified order
+grp <- data.frame(
+  "gene" = gene_unique,
+  "grp" = unlist(gene_lst),
+  stringsAsFactors = FALSE
+)
+grp$grp <- factor(
+  grp$grp,
+  ordered = TRUE,
+  levels = c("CEG", "DEEG", "SRG", "CEG & DEEG", "CEG & SRG", "DEEG & SRG")
+)
+
+# Combine CEG & DEEG to DEEG, CEG & SRG to SRG, DEEG & SRG to SRG.
+for (i in 1:nrow(grp)) {
+  if (grp$grp[i] == "CEG & DEEG") {
+    grp$grp[i] <- "CEG"
+  } else if (grp$grp[i] == "CEG & SRG") {
+    grp$grp[i] <- "CEG"
+  } else if (grp$grp[i] == "DEEG & SRG") {
+    grp$grp[i] <- "DEEG"
+  }
+}
+
+write.csv(grp, file = "genelist_all_updated_group2.csv")
+
+# Query genomic locations from BioMart
+mart <- useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+loc <- getBM(
+  attributes = c("hgnc_symbol", "chromosome_name", "start_position", "end_position"),
+  filters = c("hgnc_symbol"),
+  values = grp$gene,
+  mart = mart
+)
+
+# Remove returns with non-canonical chromosome names
+is_canonical <- function(x) (!is.na(suppressWarnings(as.numeric(x)))) | (x == "X") | (x == "Y")
+loc <- loc[is_canonical(loc$chromosome_name), ]
+names(loc)[1] <- "gene"
+
+# Merge group and genomic locations
+bed <- merge(grp, loc, by = "gene")
+bed <- bed[, c("chromosome_name", "start_position", "end_position", "gene", "grp")]
+names(bed) <- c("chr", "start", "end", "Gene", "Group")
+bed$chr <- paste0("chr", bed$chr)
+bed$col <- bed$Group
+levels(bed$col) <- c("#ffb60f", "#c13832", "#673bb8", "#1f78b4", "#D95F02", "#8dd3c7")
+# levels(bed$col) <- c('#ffb60f',"#1f78b4", "#8dd3c7")
+
+# Create plot
+circlize_plot <- function(bed) {
+  # Controls where chromosome 1 starts
+  circos.par("start.degree" = 90)
+  # Adjust with the output size
+  circos.par(cell.padding = c(0.002, 0, 0.002, 0))
+
+  # Initialize
+  circos.initializeWithIdeogram(plotType = c("labels", "axis"))
+
+  # Gene label track
+  circos.genomicLabels(
+    bed,
+    labels.column = 4,
+    side = "outside",
+    cex = 0.54,
+    col = as.character(bed$col),
+    line_col = as.character(bed$col),
+    connection_height = 0.18
+  )
+
+  # Ideogram track
+  circos.genomicIdeogram(track.height = 0.06)
+
+  circos.clear()
+}
+
+# Create legend
+lgd_category <- Legend(
+  at = levels(bed$Group),
+  type = "lines",
+  legend_gp = gpar(col = levels(bed$col), lwd = 2),
+  background = "#FFFFFF",
+  title_position = "topleft",
+  title = "Group"
+)
+
+lgd_list_vertical <- packLegend(lgd_category)
+
+# Create Venn diagram
+x_venn <- list(
+  "CEG" = 1:65,
+  "DEEG" = 66:156,
+  "SRG" = c(157:247)
+)
+
+log <- capture.output({
+  venn_object <- venn.diagram(
+    x_venn,
+    filename = NULL,
+    disable.logging = TRUE,
+    category.names = names(x_venn),
+    fill = c("#ffb60f", "#c13832", "#673bb8"),
+    fontfamily = "sans",
+    cat.fontfamily = "sans",
+    cex = 1,
+    cat.cex = 1,
+    cat.dist = c(0.09, 0.09, 0.07),
+    lwd = 0.75
+  )
+})
+
+# Arrange main plot, legend, and venn diagram on the same page
+pdf("circos.pdf", width = 12, height = 10)
+
+plot.new()
+circle_size <- unit(1, "snpc") # snpc unit gives you a square region
+
+pushViewport(viewport(
+  x = 0, y = 0.5, width = circle_size, height = circle_size,
+  just = c("left", "center")
+))
+par(omi = gridOMI(), new = TRUE)
+circlize_plot(bed)
+upViewport()
+
+draw(lgd_list_vertical, x = circle_size, just = "left")
+
+pushViewport(viewport(
+  x = 0.305, y = 0.48, width = circle_size * 0.27, height = circle_size * 0.27,
+  just = c("left", "center")
+))
+grid.draw(venn_object)
+
+dev.off()
+```
+
+# Functional characterization
+
+```{r}
+library(plotrix)
+
+x <- read.csv("genelist_all_updated_group2.csv", stringsAsFactors = FALSE)
+x <- x[, -1]
+y <- read.csv("./annotation/panther_molecular/classification_updated.csv")
+
+data <- merge(x, y[, c(1, 6)], by.x = "gene", by.y = "GeneID")
+
+# Calculate percentage
+b <- table(data$Classification) / sum(table(data$Classification))
+
+data$Classification <- factor(
+  data$Classification,
+  levels = c(
+    "Enzyme", "Ion channel", "Signaling", "Transporter/Receptor",
+    "Unknown", "Transcription/Translation", "Trafficking",
+    "Cytoskeleton", "Extracellular matrix"
+  )
+)
+
+cols <- c("#ffb60f", "#c13832", "#673bb8")
+
+f <- ggplot(data, aes(x = Classification, fill = grp)) +
+  geom_bar(stat = "count", position = "stack") +
+  scale_fill_manual(values = alpha(cols, 0.8)) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black", size = 1.5),
+    axis.ticks = element_line(colour = "black", size = 1.2),
+    axis.text = element_blank(),
+    legend.position = "none"
+  ) +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold")
+  ) +
+  xlab("Group") +
+  ylab("Gene count")
+
+print(f)
+ggsave(file = "./annotation/panther_molecular/classfication.pdf", width = 12, height = 5)
+```

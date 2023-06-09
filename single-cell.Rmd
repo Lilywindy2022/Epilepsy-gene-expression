@@ -1,0 +1,682 @@
+---
+title: "Analysis workflow for single-cell data from Allen Brain Map"
+output: html_document
+---
+
+Download and analyze the human single cell data from
+[Allen Institute for Brain Science](https://portal.brain-map.org/atlases-and-data/rnaseq/human-multiple-cortical-areas-smart-seq).
+
+# Load packages
+
+```{r, message = FALSE, warning = FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(circlize)
+library(digest)
+library(cluster)
+library(dendextend)
+library(dendsort)
+```
+
+# Read data
+
+Read expression data:
+
+```{r}
+
+expression <- readr::read_csv("./Humandata_downloaded/matrix.csv")
+```
+
+Read meta data:
+
+```{r, warning=FALSE}
+metaData <- read.csv("./Humandata_downloaded/metadata.csv")
+metaData <- data.frame(metaData)
+```
+
+# Subset data for analysis
+
+```{r, warning=FALSE}
+# Core epilepsy gene -----------------------------------------------------------
+
+epilepsy <- read.csv("genelist_all_updated_group.csv")
+grp <- epilepsy %>%
+  filter(grp == "CEG") # 51
+
+a <- colnames(expression) # 50282
+expression_epilepsy <- expression[, colnames(expression) %in% grp$gene] # 48
+
+# Sample name from expression
+sample_name <- expression[, 1]
+data_select <- data.frame(sample_name, expression_epilepsy)
+
+# Combine
+data_c <- left_join(data_select, metaData[, c(1, 6, 9)], by = "sample_name") # 49417
+
+# Get three cell types
+data_f <- data_c %>%
+  filter(class_label %in% c("GABAergic", "Glutamatergic", "Non-neuronal")) # 47432
+
+data_f_w <- data_f %>% gather(2:49, key = "Gene", value = "Value")
+
+# Save
+write.csv(data_f_w, file = "CEG_expression_3celltypes.csv")
+
+# DEEG -------------------------------------------------------------------------
+
+grp <- epilepsy %>% filter(grp == "DEEG") # 88
+
+expression_epilepsy <- expression[, colnames(expression) %in% grp$gene] # 87
+
+# Sample name from expression
+data_select <- data.frame(sample_name, expression_epilepsy)
+
+# Combine
+data_c <- left_join(data_select, metaData[, c(1, 6, 9)], by = "sample_name") # 49417
+
+# Get three cell types
+data_f <- data_c %>%
+  filter(class_label %in% c("GABAergic", "Glutamatergic", "Non-neuronal")) # 47432
+
+data_f_w <- data_f %>% gather(2:88, key = "Gene", value = "Value")
+
+# Save
+write.csv(data_f_w, file = "DEEG_expression_3celltypes.csv")
+
+# SRG --------------------------------------------------------------------------
+
+grp <- epilepsy %>% filter(grp == "SRG") # 91
+
+expression_epilepsy <- expression[, colnames(expression) %in% grp$gene] # 84
+
+# Sample name from expression
+data_select <- data.frame(sample_name, expression_epilepsy)
+
+# Combine
+data_c <- left_join(data_select, metaData[, c(1, 6, 9)], by = "sample_name") # 49417
+
+# Get three cell types
+data_f <- data_c %>%
+  filter(class_label %in% c("GABAergic", "Glutamatergic", "Non-neuronal")) # 47432
+
+data_f_w <- data_f %>% gather(2:85, key = "Gene", value = "Value")
+
+# Save
+write.csv(data_f_w, file = "SRG_expression_3celltypes.csv")
+
+# CEG & DEEG -------------------------------------------------------------------
+
+grp <- epilepsy %>% filter(grp == "CEG & DEEG") # 13
+expression_epilepsy <- expression[, colnames(expression) %in% grp$gene]
+
+# Sample name from expression
+data_select <- data.frame(sample_name, expression_epilepsy)
+
+# Combine
+data_c <- left_join(data_select, metaData[, c(1, 6, 9)], by = "sample_name")
+
+# Get three cell types
+data_f <- data_c %>%
+  filter(class_label %in% c("GABAergic", "Glutamatergic", "Non-neuronal"))
+
+data_f_w <- data_f %>% gather(2:14, key = "Gene", value = "Value")
+
+# Save
+write.csv(data_f_w, file = "CEG_DEEG_expression_3celltypes.csv")
+
+# CEG & SRG --------------------------------------------------------------------
+
+grp <- epilepsy %>% filter(grp == "CEG & SRG") # 1
+expression_epilepsy <- expression[, colnames(expression) %in% grp$gene]
+
+# Sample name from expression
+data_select <- data.frame(sample_name, expression_epilepsy)
+
+# Combine
+data_c <- left_join(data_select, metaData[, c(1, 6, 9)], by = "sample_name")
+
+# Get three cell types
+data_f <- data_c %>%
+  filter(class_label %in% c("GABAergic", "Glutamatergic", "Non-neuronal"))
+
+data_f_w <- data_f %>% gather(2, key = "Gene", value = "Value")
+
+# Save
+write.csv(data_f_w, file = "CEG_SRG_expression_3celltypes.csv")
+
+# DEEG & SRG  ------------------------------------------------------------------
+
+grp <- epilepsy %>% filter(grp == "DEEG & SRG") # 3
+expression_epilepsy <- expression[, colnames(expression) %in% grp$gene]
+
+# Sample name from expression
+data_select <- data.frame(sample_name, expression_epilepsy)
+
+# Combine
+data_c <- left_join(data_select, metaData[, c(1, 6, 9)], by = "sample_name")
+
+# Get three cell types
+data_f <- data_c %>%
+  filter(class_label %in% c("GABAergic", "Glutamatergic", "Non-neuronal"))
+
+data_f_w <- data_f %>% gather(2:4, key = "Gene", value = "Value")
+
+# Save
+write.csv(data_f_w, file = "DEEG_SRG_expression_3celltypes.csv")
+```
+
+# Combine datasets
+
+```{r, warning=FALSE}
+rm(list = ls())
+
+# Group epilepsy
+CEG <- readr::read_csv(file = "CEG_expression_3celltypes.csv")
+DEEG <- readr::read_csv(file = "DEEG_expression_3celltypes.csv")
+SRG <- readr::read_csv(file = "SRG_expression_3celltypes.csv")
+CEG_DEEG <- readr::read_csv(file = "CEG_DEEG_expression_3celltypes.csv")
+DEEG_SRG <- readr::read_csv(file = "DEEG_SRG_expression_3celltypes.csv")
+CEG_SRG <- readr::read_csv(file = "CEG_SRG_expression_3celltypes.csv")
+
+# Mean gene value in each cluster
+CEG_ave <- CEG[, -1] %>%
+  group_by(cluster_label, Gene, class_label) %>%
+  dplyr::summarize(
+    ave = mean(Value),
+    total = n(),
+    sd = sd(Value),
+    sem = sd / sqrt(total)
+  )
+CEG_ave$Group <- rep("CEG", nrow(CEG_ave))
+
+DEEG_ave <- DEEG[, -1] %>%
+  group_by(cluster_label, Gene, class_label) %>%
+  dplyr::summarize(
+    ave = mean(Value),
+    total = n(),
+    sd = sd(Value),
+    sem = sd / sqrt(total)
+  )
+DEEG_ave$Group <- rep("DEEG", nrow(DEEG_ave))
+
+SRG_ave <- SRG[, -1] %>%
+  group_by(cluster_label, Gene, class_label) %>%
+  dplyr::summarize(
+    ave = mean(Value),
+    total = n(),
+    sd = sd(Value),
+    sem = sd / sqrt(total)
+  )
+SRG_ave$Group <- rep("SRG", nrow(SRG_ave))
+
+CEG_DEEG_ave <- CEG_DEEG[, -1] %>%
+  group_by(cluster_label, Gene, class_label) %>%
+  dplyr::summarize(
+    ave = mean(Value),
+    total = n(),
+    sd = sd(Value),
+    sem = sd / sqrt(total)
+  )
+CEG_DEEG_ave$Group <- rep("CEG & DEEG", nrow(CEG_DEEG_ave))
+
+DEEG_SRG_ave <- DEEG_SRG[, -1] %>%
+  group_by(cluster_label, Gene, class_label) %>%
+  dplyr::summarize(
+    ave = mean(Value),
+    total = n(),
+    sd = sd(Value),
+    sem = sd / sqrt(total)
+  )
+DEEG_SRG_ave$Group <- rep("DEEG & SRG", nrow(DEEG_SRG_ave))
+
+CEG_SRG_ave <- CEG_SRG[, -1] %>%
+  group_by(cluster_label, Gene, class_label) %>%
+  dplyr::summarize(
+    ave = mean(Value),
+    total = n(),
+    sd = sd(Value),
+    sem = sd / sqrt(total)
+  )
+CEG_SRG_ave$Group <- rep("CEG & SRG", nrow(CEG_SRG_ave))
+
+dat_ave <- data.frame(rbind(CEG_ave, CEG_DEEG_ave, CEG_SRG_ave, DEEG_ave, DEEG_SRG_ave, SRG_ave))
+
+write.csv(dat_ave, file = "./OMIM_expression_3celltypes.csv")
+```
+
+# Plot
+
+```{r}
+rm(list = ls())
+
+dat_ave <- readr::read_csv(file = "./OMIM_expression_3celltypes.csv")
+
+# Combine CEG & DEEG to DEEG, CEG & SRG to SRG, DEEG & SRG to SRG
+for (i in 1:nrow(dat_ave)) {
+  if (dat_ave$Group[i] == "CEG & DEEG") {
+    dat_ave$Group[i] <- "CEG"
+  } else if (dat_ave$Group[i] == "CEG & SRG") {
+    dat_ave$Group[i] <- "CEG"
+  } else if (dat_ave$Group[i] == "DEEG & SRG") {
+    dat_ave$Group[i] <- "DEEG"
+  }
+}
+
+write.csv(dat_ave, file = "./OMIM_expression_3celltypes_updatedgroup.csv")
+```
+
+# Download and sort by "group and gene"
+
+```{r}
+dat_ave <- readr::read_csv("./OMIM_expression_3celltypes_updatedgroup_sorted.csv")
+
+dat_ave <- data.frame(dat_ave[, -c(1:2)])
+
+dat_ave[dat_ave == 0] <- NA
+dat_ave <- na.omit(dat_ave)
+
+# Wide format
+dat_ave_w <- dat_ave[, -c(5:8)] %>% spread(Gene, ave)
+
+dat_ave_w[dat_ave_w == 0] <- NA
+dat_ave_w <- na.omit(dat_ave_w)
+
+write.csv(
+  dat_ave_w,
+  file = "./OMIM_expression_3celltypes_updatedgroup_sorted_clean.csv"
+)
+
+gene <- colnames(dat_ave_w)[-c(1:2)]
+cluster <- dat_ave_w[, 1]
+class <- data.frame(dat_ave_w$class_label)
+names(class) <- "class_label"
+
+dat_ave_w2 <- dat_ave_w[, -c(1:2)]
+dat_ave_w2 <- t(dat_ave_w2)
+colnames(dat_ave_w2) <- dat_ave_w$cluster_label
+
+group <- unique(dat_ave[, c(2, 8)])
+
+# Prepare data
+heat <- as.matrix(dat_ave_w2)
+heat <- log2(heat)
+
+# Set color scheme and choose breaks
+myCol <- colorRamp2(
+  c(min(heat), median(heat), max(heat)),
+  c("#09f7fc", "#eef2d3", "#ff0509")
+)
+
+# Create annotation: gene labels
+genelabels <- rowAnnotation(
+  Genes = anno_mark(
+    at = seq(1, nrow(heat), 1), # 1 for long form; 6 for short form
+    labels = group$Gene[seq(1, nrow(heat), 1)], # 1 for long form
+    labels_gp = gpar(fontsize = 2.3), # 8 for long form; 5 for short form
+    padding = 0.5
+  ),
+  width = unit(1.0, "cm")
+)
+
+# Top-annotation
+ha1 <- HeatmapAnnotation(
+  Cell.type = class$class_label,
+  col = list(
+    Cell.type = c(
+      "GABAergic" = "#5ab4ac",
+      "Glutamatergic" = "#f1a340",
+      "Non-neuronal" = "gray"
+    )
+  ),
+  annotation_name_side = "left",
+  annotation_label = "Cell type",
+  annotation_legend_param = list(
+    title = "Cell type",
+    title_gp = gpar(fontsize = 9),
+    labels = c("GABAergic", "Glutamatergic", "Non-neuronal"),
+    labels_gp = gpar(fontsize = 8),
+    legend_height = unit(2, "cm"),
+    legend_width = unit(0.5, "cm")
+  )
+)
+
+# Clusters
+row_dend <- dendsort(hclust(dist(heat)))
+col_dend <- dendsort(hclust(dist(t(heat))))
+
+# Create heatmap object
+ht_list <- Heatmap(
+  heat,
+  col = myCol,
+  name = "Expression",
+  row_gap = unit(1, "mm"),
+  column_gap = unit(1, "mm"),
+  rect_gp = gpar(col = "white"),
+  # Row (gene) parameters
+  row_title = NULL,
+  cluster_rows = FALSE,
+  show_row_dend = TRUE,
+  show_row_names = TRUE,
+  column_title = NULL,
+  cluster_columns = col_dend,
+  show_column_dend = TRUE,
+  show_column_names = TRUE,
+  column_names_gp = gpar(fontsize = 7),
+  clustering_method_rows = "ward.D2",
+  clustering_method_columns = "ward.D2",
+  show_heatmap_legend = TRUE,
+  heatmap_legend_param = list(
+    title = "Expression",
+    at = c(min(heat), median(heat), max(heat)),
+    title_gp = gpar(fontsize = 9),
+    labels = c("low", "median", "high"),
+    labels_gp = gpar(fontsize = 8),
+    legend_height = unit(0.5, "cm"),
+    legend_width = unit(2, "cm"),
+    direction = "horizontal"
+  ),
+  top_annotation = ha1
+) +
+  Heatmap(
+    group$Group,
+    col = c("#ffb60f", "#c13832", "#673bb8"),
+    name = "Group",
+    width = unit(4, "mm"),
+    show_column_names = FALSE,
+    show_heatmap_legend = TRUE,
+    heatmap_legend_param = list(
+      title = "Group",
+      title_gp = gpar(fontsize = 9),
+      # labels = c("CEG", "DEEG", "SRG"),
+      labels_gp = gpar(fontsize = 8),
+      legend_height = unit(2, "cm"),
+      legend_width = unit(0.5, "cm")
+    )
+  )
+
+png(
+  "./plots/OMIM_clusters_all_1WAY_noname.png",
+  width = 6.8, height = 6.8, units = "in", res = 300
+)
+draw(
+  ht_list,
+  main_heatmap = "Expression",
+  merge_legend = TRUE,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right"
+)
+dev.off()
+```
+
+# Calculate mean values
+
+```{r}
+rm(list = ls())
+
+data1 <- readr::read_csv("./OMIM_expression_3celltypes_updatedgroup_sorted_clean.csv")
+data1 <- data1[, -1]
+
+data2 <- data1 %>%
+  gather(3:ncol(data1), key = Gene, value = expression) %>%
+  mutate(item = paste(cluster_label, Gene))
+
+data3 <- readr::read_csv(file = "./OMIM_expression_3celltypes_updatedgroup_sorted.csv")
+
+data3 <- data3 %>%
+  mutate(item = paste(cluster_label, Gene))
+
+data <- left_join(data2, data3[, c(10:11)])
+
+ave <- data %>%
+  group_by(cluster_label, Group) %>%
+  summarise(
+    group_mean = mean(expression),
+    total = n(),
+    sd = sd(expression),
+    sem = sd / sqrt(total)
+  )
+
+unique(ave$cluster_label)
+
+ave$cluster_label <- factor(
+  ave$cluster_label,
+  levels = c(
+    "Inh L2-4 PVALB C8orf4", "Inh L5 PVALB CNTNAP3P2", "Inh L1-3 PVALB WFDC2",
+    "Inh L3-4 PVALB HOMER3", "Inh L5-6 PVALB STON2", "Inh L3-5 SST MAFB",
+    "Inh L4-6 SST MTHFD2P6", "Inh L1 LAMP5 NDNF", "Inh L1-4 LAMP5 DUSP4",
+    "Inh L5-6 LAMP5 SFTA3", "Inh L1-3 VIP GGH", "Inh L2-6 VIP VIP",
+    "Inh L1-3 VIP ZNF322P1", "Inh L3 VIP CBLN1", "Inh L1 ADARB2 ADAM33",
+    "Inh L1 SST CXCL14", "Inh L1-5 VIP KCNJ2", "Exc L5 RORB SNHG7",
+    "Exc L6 THEMIS LINC00343", "Exc L5-6 THEMIS TMEM233", "Exc L6 THEMIS EGR3",
+    "Exc L5-6 THEMIS GPR21", "Exc L5-6 FEZF2 MYBPHL", "Exc L6 FEZF2 KRT17",
+    "Exc L6 FEZF2 FAM95C", "Exc L6 FEZF2 VWA2", "Exc L6 FEZF2 CPZ",
+    "Exc L3 RORB CARTPT", "Exc L3-4 RORB FOLH1B", "Exc L2-3 LINC00507 RPL9P17",
+    "Exc L3-4 RORB PRSS12", "Exc L3-4 RORB SEMA6D", "Exc L3 LINC00507 PSRC1",
+    "Exc L4-5 RORB LCN15", "Exc L4-5 RORB RPL31P31", "Exc L4-5 RORB HNRNPA1P46",
+    "Exc L3-5 RORB CMAHP", "Exc L5 RORB LINC01202", "Exc L2-4 RORB GRIK1",
+    "Exc L4-5 RORB LINC01474", "Exc L4 RORB BHLHE22", "Astro L1-6 FGFR3 ETNPPL",
+    "OPC L1-6 MYT1", "Micro L1-6 C1QC", "Oligo L4-6 OPALIN"
+  )
+)
+
+f <- ggplot(data = ave, aes(x = cluster_label, y = group_mean, group = Group)) +
+  geom_bar(stat = "identity", position = position_dodge(), aes(fill = Group)) +
+  scale_color_manual(values = c("#ffb60f", "#c13832", "#673bb8")) +
+  scale_fill_manual(values = c("#ffb60f", "#c13832", "#673bb8")) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black", size = 0.5),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    axis.title.x = element_blank(),
+    legend.position = "none",
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 9)
+  ) + 
+  ylab("Expression level")
+
+print(f)
+ggsave(file = "./cluster_mean.pdf", width = 6, height = 2.5)
+```
+
+# Stats
+
+```{r}
+rm(list = ls())
+
+data1 <- readr::read_csv("./OMIM_expression_3celltypes_updatedgroup_sorted_clean.csv")
+data1 <- data1[, -1]
+
+data2 <- data1 %>%
+  gather(3:ncol(data1), key = Gene, value = expression) %>%
+  mutate(item = paste(cluster_label, Gene))
+
+data3 <- readr::read_csv(file = "./OMIM_expression_3celltypes_updatedgroup_sorted.csv")
+
+data3 <- data3 %>%
+  mutate(item = paste(cluster_label, Gene))
+
+data <- left_join(data2, data3[, c(10:11)])
+
+ave <- data %>%
+  group_by(class_label, Group) %>%
+  summarise(
+    group_mean = mean(expression),
+    total = n(),
+    sd = sd(expression),
+    sem = sd / sqrt(total)
+  )
+
+unique(ave$class_label)
+
+ave$class_label <- factor(
+  ave$class_label,
+  levels = c("GABAergic", "Glutamatergic", "Non-neuronal")
+)
+
+f <- ggplot(data = ave, aes(x = class_label, y = group_mean, group = Group)) +
+  # geom_point(aes(colour = Group)) +
+  geom_errorbar(aes(ymin = group_mean - sem, ymax = group_mean + sem), position = position_dodge(), color = "gray") +
+  geom_bar(stat = "identity", position = position_dodge(), aes(fill = Group)) +
+  scale_color_manual(values = c("#ffb60f", "#c13832", "#673bb8")) +
+  scale_fill_manual(values = c("#ffb60f", "#c13832", "#673bb8")) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black", size = 0.5),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    axis.title.x = element_blank(),
+    legend.position = "none",
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 9)
+  ) + 
+  ylab("Expression level")
+
+print(f)
+ggsave(file = "./class_mean.pdf", width = 3, height = 2.5)
+
+# stat_class
+ave <- data %>%
+  group_by(Gene, Group, class_label) %>%
+  summarise(ave = mean(expression), total = n())
+
+# GABA
+gaba <- ave %>% filter(class_label == "GABAergic")
+pairwise.wilcox.test(
+  gaba$ave,
+  gaba$Group,
+  p.adjust.method = "BH"
+)
+
+## glu
+glu <- ave %>% filter(class_label == "Glutamatergic")
+pairwise.wilcox.test(
+  glu$ave,
+  glu$Group,
+  p.adjust.method = "BH"
+)
+
+## non
+non <- ave %>% filter(class_label == "Non-neuronal")
+pairwise.wilcox.test(
+  non$ave,
+  non$Group,
+  p.adjust.method = "BH"
+)
+
+# stat_grp
+ave <- data %>%
+  group_by(Gene, Group, class_label) %>%
+  summarise(ave = mean(expression), total = n())
+
+# CEG
+CEG <- ave %>% filter(Group == "CEG")
+pairwise.wilcox.test(
+  CEG$ave,
+  CEG$class_label,
+  p.adjust.method = "BH"
+)
+
+# DEEG
+DEEG <- ave %>% filter(Group == "DEEG")
+pairwise.wilcox.test(
+  DEEG$ave,
+  DEEG$class_label,
+  p.adjust.method = "BH"
+)
+
+# SRG
+SRG <- ave %>% filter(Group == "SRG")
+pairwise.wilcox.test(
+  SRG$ave,
+  SRG$class_label,
+  p.adjust.method = "BH"
+)
+```
+
+# Plot ten most studied genes
+
+```{r}
+rm(list = ls())
+
+# Group epilepsy
+CEG <- readr::read_csv(file = "CEG_expression_3celltypes.csv")
+DEEG <- readr::read_csv(file = "DEEG_expression_3celltypes.csv")
+SRG <- readr::read_csv(file = "SRG_expression_3celltypes.csv")
+CEG_DEEG <- readr::read_csv(file = "CEG_DEEG_expression_3celltypes.csv")
+DEEG_SRG <- readr::read_csv(file = "DEEG_SRG_expression_3celltypes.csv")
+CEG_SRG <- readr::read_csv(file = "CEG_SRG_expression_3celltypes.csv")
+
+CEG$Group <- rep("CEG", nrow(CEG))
+DEEG$Group <- rep("DEEG", nrow(DEEG))
+SRG$Group <- rep("SRG", nrow(SRG))
+CEG_DEEG$Group <- rep("CEG", nrow(CEG_DEEG))
+DEEG_SRG$Group <- rep("DEEG", nrow(DEEG_SRG))
+CEG_SRG$Group <- rep("CEG", nrow(CEG_SRG))
+
+data1 <- rbind(CEG, DEEG)
+data2 <- rbind(data1, SRG)
+data3 <- rbind(data2, CEG_DEEG)
+data4 <- rbind(data3, DEEG_SRG)
+data5 <- rbind(data4, CEG_SRG)
+
+cluster <- c(
+  "Inh L2-4 PVALB C8orf4", "Inh L5 PVALB CNTNAP3P2", "Inh L1-3 PVALB WFDC2",
+  "Inh L3-4 PVALB HOMER3", "Inh L5-6 PVALB STON2", "Inh L3-5 SST MAFB",
+  "Inh L4-6 SST MTHFD2P6", "Inh L1 LAMP5 NDNF", "Inh L1-4 LAMP5 DUSP4",
+  "Inh L5-6 LAMP5 SFTA3", "Inh L1-3 VIP GGH", "Inh L2-6 VIP VIP",
+  "Inh L1-3 VIP ZNF322P1", "Inh L3 VIP CBLN1", "Inh L1 ADARB2 ADAM33",
+  "Inh L1 SST CXCL14", "Inh L1-5 VIP KCNJ2", "Exc L5 RORB SNHG7",
+  "Exc L6 THEMIS LINC00343", "Exc L5-6 THEMIS TMEM233", "Exc L6 THEMIS EGR3",
+  "Exc L5-6 THEMIS GPR21", "Exc L5-6 FEZF2 MYBPHL", "Exc L6 FEZF2 KRT17",
+  "Exc L6 FEZF2 FAM95C", "Exc L6 FEZF2 VWA2", "Exc L6 FEZF2 CPZ",
+  "Exc L3 RORB CARTPT", "Exc L3-4 RORB FOLH1B", "Exc L2-3 LINC00507 RPL9P17",
+  "Exc L3-4 RORB PRSS12", "Exc L3-4 RORB SEMA6D", "Exc L3 LINC00507 PSRC1",
+  "Exc L4-5 RORB LCN15", "Exc L4-5 RORB RPL31P31", "Exc L4-5 RORB HNRNPA1P46",
+  "Exc L3-5 RORB CMAHP", "Exc L5 RORB LINC01202", "Exc L2-4 RORB GRIK1",
+  "Exc L4-5 RORB LINC01474", "Exc L4 RORB BHLHE22", "Astro L1-6 FGFR3 ETNPPL",
+  "OPC L1-6 MYT1", "Micro L1-6 C1QC", "Oligo L4-6 OPALIN"
+)
+
+data6 <- data5 %>% filter(cluster_label %in% cluster)
+data6$cluster_label <- factor(data6$cluster_label, levels = cluster)
+
+topgene <- c(
+  "CHRNA4", "CSTB", "DEPDC5", "EPM2A", "KCNQ2", "KCNT1", "SCN1A", "SCN2A",
+  "SCN8A", "KCNA2", "GAD1", "SLC6A1"
+)
+
+for (j in 1:length(topgene)) {
+  g <- topgene[j]
+  dat <- data6 %>% filter(Gene == g)
+
+  # data$cluster_label <- factor(data$cluster_label, levels = c("GABAergic", "Glutamatergic", "Non-neuronal"))
+
+  f <- ggplot(dat, aes(x = cluster_label, y = Value)) +
+    geom_boxplot(outlier.size = 0.5) +
+    theme_bw() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black", size = 0.5),
+      axis.ticks = element_line(colour = "black", size = 0.5),
+      axis.title.x = element_blank(),
+      legend.position = "none",
+      axis.text.y = element_text(size = 8),
+      axis.text.x = element_text(size = 7, angle = 90, vjust = 0.5, hjust = 1)
+    ) + 
+    ylab("Expression level") +
+    ggtitle(g)
+
+  path <- paste("./plot/", g, "_box.png", sep = "")
+  ggsave(f, file = path, width = 6.8, height = 4)
+}
+```
