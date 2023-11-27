@@ -1,0 +1,2218 @@
+---
+title: "analysis of genes from OMIM, Macnee et al, and Oliver et al."
+output: html_document
+date: '2023-09-24'
+---
+
+# Load packages
+
+```{r, message = FALSE, warning = FALSE}
+suppressPackageStartupMessages(library("circlize"))
+suppressPackageStartupMessages(library("ComplexHeatmap"))
+suppressPackageStartupMessages(library("dplyr"))
+suppressPackageStartupMessages(library("dendextend"))
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(xlsx)
+require(RColorBrewer)
+require(ComplexHeatmap)
+require(circlize)
+require(digest)
+require(cluster)
+library(biomaRt)
+library(gridBase)
+library(ggvenn)
+library(plotrix)
+library(dendsort)
+library(dendextend)
+```
+
+################################################################
+#######################gene list from OMIM######################
+################################################################
+
+#download OMIM data 
+
+#mim2gene.txt:A tab-delimited file linking MIM numbers with NCBI Gene IDs, Ensembl Gene IDs, and HGNC Approved Gene Symbols.
+#genemap2.txt :A tab-delimited file containing OMIM's Synopsis of the Human Gene Map including additional information such as genomic coordinates and inheritance.
+#morbidmap.txt:A tab-delimited file of OMIM's Synopsis of the Human Gene Map (same as genemap2.txt above) sorted alphabetically by disorder.
+#mimTitles.txt:A tab-delimited file of MIM numbers and titles.
+
+
+```{r,echo=FALSE, warning=FALSE} 
+dir.create("./OMIM_download")
+#gene
+url1<- "https://omim.org/static/omim/data/mim2gene.txt"
+desk1 <- "./OMIM_download/mim2gene.txt"
+download.file(url1, desk1)
+
+#titles
+url2 <- "https://data.omim.org/downloads/8hzpjq5NT3yy1wute8ClNg/mimTitles.txt"
+desk2 <- "./OMIM_download/mimTitles.txt"
+download.file(url2, desk2)
+
+#genemap2
+url3 <- "https://data.omim.org/downloads/8hzpjq5NT3yy1wute8ClNg/genemap2.txt"
+desk3 <- "./OMIM_download/genemap2.txt"
+download.file(url3, desk3)
+
+#morbidmap
+url4 <- "https://data.omim.org/downloads/8hzpjq5NT3yy1wute8ClNg/morbidmap.txt"
+desk4 <- "./OMIM_download/morbidmap.txt"
+download.file(url4, desk4)
+
+```
+
+
+# gene in many phenotypes (>=1)
+
+# Each Phenotype is followed by its MIM number, if different from that
+# of the locus/gene, and then followed by its phenotype mapping
+# key in parentheses (explanation below).
+#
+#
+# Phenotype Mapping key - Appears in parentheses after a disorder :
+# 1 - The disorder is placed on the map based on its association with
+# a gene, but the underlying defect is not known.
+# 2 - The disorder has been placed on the map by linkage or other
+# statistical method; no mutation has been found.
+# 3 - The molecular basis for the disorder is known; a mutation has been
+# found in the gene.
+# 4 - A contiguous gene deletion or duplication syndrome, multiple genes
+# are deleted or duplicated causing the phenotype.
+
+#organize the mobidmap.txt file and save as morbidmap_updated.txt (get rid of {} in some items)
+
+```{r}
+dir.create("./OMIM_intermediate")
+gene_morbid <- read.table("OMIM_download/morbidmap_updated.txt",header = FALSE,sep = "\t",na.string = "NA",fill = TRUE,comment.char = "#")
+colnames(gene_morbid) <- c("Phenotype", "Gene Symbols", "MIM Number", "Cyto Location")
+
+gene_morbid = gene_morbid[-c(8534:8537),] # to remove unnecessary rows
+gene_morbid$Phenotype = gsub("\\?","",gene_morbid$Phenotype)
+
+# pick phenotype mapping key = 3, i.e. the molecular basis for the disorder is known.
+
+for (i in 1:nrow(gene_morbid)) {
+  r = as.character(gene_morbid$Phenotype)[i]
+  a = regmatches(r, gregexpr("\\(.\\)$", r, perl=T))[[1]]
+  gene_morbid$type[i] <- a
+}
+
+gene_known <- gene_morbid %>%
+              filter(type == "(3)") # 3 - The molecular basis for the disorder is known; a mutation has been found in the gene.
+
+
+# pick those genes in epilepsy, epileptic, seizures, seizure
+
+list = c("epilepsy", "epileptic", "seizures", "seizure","Epilepsy", "Epileptic", "Seizures", "Seizure")
+epi = vector()
+for (i in 1:nrow(gene_known)) {
+  gene0 = gene_known$Phenotype[i]
+  a0 = strsplit(as.character(gene0),split=",")
+  a1 = strsplit(as.character(a0[[1]]),split="\\s+")
+  epi0 = ifelse(unlist(a1) %in% list , "Keep", "Discard")
+  epi1 = ifelse("Keep" %in% epi0, epi1 <- "Keep", epi1 <- "Discard")
+  epi = append(epi, epi1)
+}
+
+gene_known <- data.frame(gene_known, epi)
+
+gene_known_epilepsy =  subset(gene_known, epi == "Keep")
+
+
+# get the gene
+gene = vector()
+for (i in 1:nrow(gene_known_epilepsy)) {
+  gene0 = gene_known_epilepsy$Gene.Symbols[i]
+  a0 = strsplit(as.character(gene0),split=",")
+  a1 = strsplit(unlist(a0),split="\\s+")
+  gene = append(gene, unlist(a1)[1])
+}
+g = table(as.character(gene))                  
+gene = unique(gene) 
+
+write.table(gene, file = "OMIM_intermediate/gene_epilepsy.txt", sep = ",") # n = 247
+
+```
+
+# Manually separate genes based on phenotypes into 3 categories: Core epilepsy genes, DEE genes, seizure related genes (SR) and save the file as gene_known_epilepsy_updated.xlsx
+
+```{r, message = FALSE, warning = FALSE}
+rm(list = ls())
+
+#CEG
+epilepsy <- read.xlsx("OMIM_intermediate/gene_epilepsy_updated.xlsx", header = TRUE, sheetIndex = 2)
+epilepsy = epilepsy[,-1]
+
+list_e = vector()
+for (i in 1: nrow(epilepsy)) {
+  gene = epilepsy[i, 2]
+  if (!is.na(gene)) {
+    a = strsplit(gene,",")
+    b = unlist(a)
+    b = gsub(" ","", b)
+    list_e = append(list_e, b[1])
+  }
+}
+group = rep("CEG", length(list_e))
+list_e = data.frame(Group = group, Gene = list_e)
+
+
+#DEE
+DEE <- read.xlsx("OMIM_intermediate/gene_epilepsy_updated.xlsx", header = TRUE, sheetIndex = 3)
+DEE = DEE[,-1]
+
+list_DEE = vector()
+for (i in 1: nrow(DEE)) {
+  gene = DEE[i, 2]
+  if (!is.na(gene)) {
+    a = strsplit(gene,",")
+    b = unlist(a)
+    b = gsub(" ","", b)
+    list_DEE = append(list_DEE, b[1])
+  }
+}
+group = rep("DEEG", length(list_DEE))
+list_DEE = data.frame(Group = group, Gene = list_DEE)
+
+
+#SR
+SR <- read.xlsx("OMIM_intermediate/gene_epilepsy_updated.xlsx", header = TRUE, sheetIndex = 4)
+SR = SR[,-1]
+
+list_SR = vector()
+for (i in 1: nrow(SR)) {
+  gene = SR[i, 2]
+  if (!is.na(gene)) {
+    a = strsplit(gene,",")
+    b = unlist(a)
+    b = gsub(" ","", b)
+    list_SR = append(list_SR, b[1])
+  }
+}
+
+group = rep("SRG", length(list_SR))
+list_SR = data.frame(Group = group, Gene = list_SR)
+
+
+#get a complete list
+all1 = rbind(list_e, list_DEE)
+all2 = rbind(all1, list_SR)
+
+write.csv(all2, file = "OMIM_intermediate/genelist_all.csv")
+
+
+x <- read.csv("OMIM_intermediate/genelist_all.csv", stringsAsFactors = FALSE)
+
+# Fix genes with updated HGNC symbols
+# The list is from comparing setdiff(bed$gene, loc$hgnc_symbol)
+x[which(x$Gene == "MARCH6"), "Gene"] <- "MARCHF6"
+x[which(x$Gene == "ICK"), "Gene"] <- "CILK1"
+x[which(x$Gene == "ADPRHL2"), "Gene"] <- "ADPRS"
+
+x = x[,-1]
+
+write.csv(x, file = "gene_OMIM.csv")
+
+```
+
+
+
+##########################################################################
+#######################gene list from Oliver et al. ######################
+##########################################################################
+
+## gene list was from https://github.com/bahlolab/Genes4Epilepsy/releases/tag/v2023_09
+
+##See Oliver KL, et al. Genes4Epilepsy: An epilepsy gene resource. Epilepsia. 2023 May;64(5):1368-1375. PMID: 36808730 for details
+
+##broad phenotypic group: Genetic Generalized Epilepsy (GGE), Focal epilepsy, DEE, Progressive Myoclonus Epilepsy (PME), malformations of cortical development (MCD)
+
+```{r,echo=FALSE, warning=FALSE} 
+dir.create("./Oliver_download")
+#gene
+url1<- "https://github.com/bahlolab/Genes4Epilepsy/files/12604507/EpilepsyGenes_v2023-09.tsv.zip"
+desk1 <- "./Oliver_download/gene_Oliver.tsv.zip"
+download.file(url1, desk1)
+unzip("./Oliver_download/gene_Oliver.tsv.zip")
+```
+
+
+##########################################################################
+#######################gene list from Macnee et al. ######################
+##########################################################################
+
+## gene list was from https://ars.els-cdn.com/content/image/1-s2.0-S1090379822001702-mmc1.xlsx
+
+##See Macnee, et al. Data-driven historical characteriztion of epilepsy-associated genes. Eur J. Paediatr Neurol. 2021, 42:82-87. PMID: 36586220 for details
+
+
+```{r,echo=FALSE, warning=FALSE} 
+
+dir.create("./Macnee_download")
+#gene
+url1<- "https://ars.els-cdn.com/content/image/1-s2.0-S1090379822001702-mmc1.xlsx"
+desk1 <- "./Macnee_download/gene_Macnee.xlsx"
+desk2 <- "./gene_Macnee.xlsx"
+download.file(url1, desk1)
+download.file(url1, desk2)
+
+```
+
+
+####################################################################################
+#######################genes shared among OMIM, Macnee, Oliver######################
+####################################################################################
+
+```{r,echo=FALSE, warning=FALSE}
+
+rm(list=ls())
+
+
+if (!dir.exists("./plot")){
+  dir.create("./plot")
+}
+
+if (!dir.exists("./three_intermediate")){
+  dir.create("./three_intermediate")
+}
+
+OMIM <- read.csv(file = "gene_OMIM.csv")
+Macnee <- read.xlsx(file = "gene_Macnee.xlsx", sheetIndex = 1)
+Oliver = read.csv("EpilepsyGenes_v2023-09.tsv", sep = "\t")
+
+
+#########Fig. 1B, venn diagram
+
+x = list(OMIM = unique(OMIM$Gene), Oliver = Oliver$Gene, Macnee = Macnee$Symbol)
+
+png(file = "./plot/venn.jpg", width = 5, height = 5, units="in", res = 300)
+ggvenn(
+  x, 
+  fill_color = c('#7fc97f','#fdc086', '#beaed4'),
+  fill_alpha = 0.6,
+  show_percentage = TRUE,
+  stroke_size = 0.5, 
+  set_name_size = 5,
+  show_outside = "auto"
+  ) 
+
+dev.off()
+
+
+##########gene list
+gene_shared <- unique(OMIM$Gene)[unique(OMIM$Gene) %in% c(Oliver$Gene, Macnee$Symbol)]
+gene_removed <- unique(OMIM$Gene)[!unique(OMIM$Gene) %in% c(Oliver$Gene, Macnee$Symbol)]
+
+write.csv(gene_shared, file = "./three_intermediate/gene_shared.csv")
+write.csv(sort(gene_removed), file = "./three_intermediate/gene_removed.csv")
+
+
+#########phenotype comparison
+# Get all groups for each unique gene
+gene_unique <- unique(OMIM$Gene)
+
+gene_lst <- vector("list", length(gene_unique))
+for (i in seq_along(gene_unique)) gene_lst[[i]] <- sort(unique(OMIM[OMIM$Gene == gene_unique[i], "Group"]))
+gene_lst <- lapply(gene_lst, function(x) paste(x, collapse = " & "))
+# Arrange levels in specified order
+OMIM <- data.frame(
+  "gene" = gene_unique,
+  "grp" = unlist(gene_lst),
+  stringsAsFactors = FALSE
+)
+OMIM$grp <- factor(OMIM$grp, ordered = TRUE, levels = c("SRG", "CEG & SRG", "DEEG & SRG", "CEG", "DEEG", "CEG & DEEG"))
+
+
+OMIM_shared <- OMIM[OMIM$gene %in% gene_shared,]
+names(OMIM_shared) <- c("Gene", "Grp")
+Oliver_shared <- Oliver[ Oliver$Gene %in% gene_shared,]
+
+final = left_join(OMIM_shared, Oliver_shared[,c(2,7)])
+names(final) <- c("Gene", "Group_OMIM", "Group_Oliver")
+write.csv(final, file = "./three_intermediate/gene_OMIM_Oliver_phenotype.csv")
+```
+
+
+####################################################################################
+#######################Genomic profiling############################################
+####################################################################################
+
+# Circos plot (Fig.2)
+
+```{r, warning=FALSE}
+shared <- read.csv("./three_intermediate/gene_shared.csv", stringsAsFactors = FALSE)
+shared <- data.frame(shared[,-1])
+names(shared) <- "Gene"
+OMIM <- read.csv("gene_OMIM.csv")
+
+x <- left_join(shared, OMIM[,-1])
+
+# Get all groups for each unique gene
+gene_unique <- unique(x$Gene)
+
+gene_lst <- vector("list", length(gene_unique))
+for (i in seq_along(gene_unique)) gene_lst[[i]] <- sort(unique(x[x$Gene == gene_unique[i], "Group"]))
+gene_lst <- lapply(gene_lst, function(x) paste(x, collapse = " & "))
+
+# Arrange levels in specified order
+grp <- data.frame(
+  "gene" = gene_unique,
+  "grp" = unlist(gene_lst),
+  stringsAsFactors = FALSE
+)
+grp$grp <- factor(grp$grp, ordered = TRUE, levels = c("CEG", "DEEG", "SRG", "CEG & DEEG", "CEG & SRG", "DEEG & SRG"))
+
+write.csv(grp, file = "gene_epilepsy_final.csv")
+
+
+# Query genomic locations from BioMart
+mart <- useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+loc <- getBM(
+  attributes = c("hgnc_symbol", "chromosome_name", "start_position", "end_position"),
+  filters = c("hgnc_symbol"),
+  values = grp$gene,
+  mart = mart
+)
+
+# Remove returns with non-canonical chromosome names
+is_canonical <- function(x) (!is.na(suppressWarnings(as.numeric(x)))) | (x == "X") | (x == "Y")
+loc <- loc[is_canonical(loc$chromosome_name), ]
+names(loc)[1] <- "gene"
+
+# Merge group and genomic locations
+bed <- merge(grp, loc, by = "gene")
+y = table(bed$chr)
+write.csv(y, file = "./three_intermediate/geneNumberonEachChromosome.csv")
+bed <- bed[, c("chromosome_name", "start_position", "end_position", "gene", "grp")]
+names(bed) <- c("chr", "start", "end", "Gene", "Group")
+bed$chr <- paste0("chr", bed$chr)
+bed$col <- bed$Group
+levels(bed$col) <- c('#ffb60f','#c13832','#673bb8', "#1f78b4", "#D95F02", "#8dd3c7")
+
+
+
+# Create plot
+circlize_plot <- function(bed) {
+  # Controls where chromosome 1 starts
+  circos.par("start.degree" = 90)
+  # Adjust with the output size
+  circos.par(cell.padding = c(0.002, 0, 0.002, 0))
+  
+  # Initialize
+  circos.initializeWithIdeogram(plotType = c("labels", "axis"))
+  
+  # Gene label track
+  circos.genomicLabels(
+    bed,
+    labels.column = 4,
+    side = "outside",
+    cex = 0.54,
+    col = as.character(bed$col),
+    line_col = as.character(bed$col),
+    connection_height = 0.18
+  )
+  
+  # Ideogram track
+  circos.genomicIdeogram(track.height = 0.06)
+
+  circos.clear()
+}
+
+# Create legend
+lgd_category <- Legend(
+  at = levels(bed$Group),
+  type = "lines",
+  legend_gp = gpar(col = levels(bed$col), lwd = 2),
+  background = "#FFFFFF",
+  title_position = "topleft",
+  title = "Group"
+)
+
+lgd_list_vertical <- packLegend(lgd_category)
+
+# Create Venn diagram
+x_venn <- list(
+  "CEG" = c(1:57),
+  "DEEG" = c(31:43, 58:143, 144:146),
+  "SRG" = c(1, 115:117, 147:230)
+)
+
+log <- capture.output({
+  venn_object <- venn.diagram(
+    x_venn,
+    filename = NULL,
+    disable.logging = TRUE,
+    category.names = names(x_venn),
+    fill = c('#ffb60f','#c13832','#673bb8'),
+    fontfamily = "sans",
+    cat.fontfamily = "sans",
+    cex = 1,
+    cat.cex = 1,
+    cat.dist = c(0.09, 0.09, 0.07),
+    lwd = 0.75
+  )
+})
+
+# Arrange main plot, legend, and venn diagram on the same page
+pdf("./plot/circos.pdf", width = 12, height = 10)
+
+plot.new()
+circle_size <- unit(1, "snpc") # snpc unit gives you a square region
+
+pushViewport(viewport(
+  x = 0, y = 0.5, width = circle_size, height = circle_size,
+  just = c("left", "center")
+))
+par(omi = gridOMI(), new = TRUE)
+circlize_plot(bed)
+upViewport()
+
+draw(lgd_list_vertical, x = circle_size, just = "left")
+
+pushViewport(viewport(
+  x = 0.305, y = 0.48, width = circle_size * 0.27, height = circle_size * 0.27,
+  just = c("left", "center")
+))
+grid.draw(venn_object)
+
+dev.off()
+```
+
+
+####################################################################################
+#######################Functional characterization##################################
+####################################################################################
+
+#gene ontology analysis (pantherdb.org, functional classification viewed in gene list) and obtained a file named classification.csv
+#Fig. 3
+
+```{r, warning=FALSE}
+rm(list=ls())
+
+if (!dir.exists("./annotation")){
+  dir.create("./annotation")
+}
+
+
+x <- read.csv("gene_epilepsy_final.csv")
+x <- x[,-1]
+y = read.csv(file = "./annotation/classification.csv")
+
+data= merge(x, y[,c(1, 6)], by.x = "gene", by.y="GeneID")
+
+#calculate percentage
+b = table(data$Classification)/sum(table(data$Classification))
+
+
+data$Classification <- factor(data$Classification, levels = c("Enzyme", "Ion channel", "Signaling", "Transporter/Receptor", "Unknown", "Transcription/Translation", "Trafficking", "Cytoskeleton", "Extracellular matrix"))
+
+cols <- c('#ffb60f',"#1f78b4", "#D95F02",'#c13832', "#8dd3c7", '#673bb8')
+
+
+f <- ggplot(data, aes(x = Classification, fill = grp)) +
+     geom_bar(stat = "count", position="stack") +
+     scale_fill_manual(values = alpha(cols, 0.8)) +
+     theme_bw()+
+     theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.background = element_blank(),
+           axis.line = element_line(colour = "black",size=1.5),
+           axis.ticks = element_line(colour="black",size =1.2),
+           axis.text.x = element_blank(),
+           axis.text.y=element_text(size=12),
+           axis.title.x = element_blank(),
+           axis.title.y = element_text(size = 14, face = "bold")) +
+      ylab("Gene count")
+    
+
+ggsave(file = "./plot/classfication.png",width = 12, height = 5) 
+
+```
+
+
+####################################################################################
+########################Tissue expression###########################################
+####################################################################################
+
+# download gtex data (https://www.gtexportal.org/home/datasets): GTEx analysis V8
+
+Normalised quantification (TPM) across transcripts for each sample using GENCODEv26. Quantifications were carried out using flair quantify.
+
+
+
+# download Annotations
+
+```{r,echo=FALSE, warning=FALSE}
+dir.create("./GTEX_download/")
+
+
+#Sample Attributes
+url1 <- "https://storage.googleapis.com/gtex_analysis_v8/annotations/GTEx_Analysis_v8_Annotations_SampleAttributesDD.xlsx"
+desk1 <- "./GTEX_download/SampleAttributesDS.xlsx"
+download.file(url1, desk1)
+
+#Subject Phenotypes
+url2 <- "https://storage.googleapis.com/gtex_analysis_v8/annotations/GTEx_Analysis_v8_Annotations_SubjectPhenotypesDD.xlsx"
+desk2 <- "./GTEX_download/SubjectPhenotypesDS.xlsx"
+download.file(url2, desk2)
+
+```
+
+# manually obtain the tissue information from the website and saved as "list_tissue.csv"
+
+
+# download RNA-Seq Data (Gene TPMs by tissue)
+```{r,echo=FALSE, warning=FALSE}
+list = read.csv("./GTEX_download/list_tissue.csv")
+
+for (i in 1: nrow(list)){
+  a = list[i,1]
+  link = paste("https://storage.googleapis.com/gtex_analysis_v8/rna_seq_data/gene_tpm/", a, sep = "")
+  url = link
+  desk = paste("./GTEX_download/", a, sep = "")
+  download.file(url, desk)
+}
+```
+
+# get tissue names
+
+```{r,echo=FALSE, warning=FALSE}
+# tissue
+list = read.csv("./GTEX_download/list_tissue.csv")
+name = as.character(list$Name)
+
+tissue = str_extract_all(name, "(?<=v8_).+(?=.gct)")
+tissue = as.character(tissue)
+write.csv(tissue, file = "./GTEX_download/tissuenames.csv")
+```
+
+
+# get expression data for genes 
+
+```{r,echo=FALSE, warning=FALSE}
+rm(list=ls())
+dir.create("./GTEX_download/Data_processed/")
+dir.create("./GTEX_download/epilepsygenes/")
+
+list_exp = list.files(path = "./GTEX_download/", pattern = ".gct.gz")
+tissue = read.csv("./GTEX_download/tissuenames.csv")
+
+#mean expression
+for (i in 1:nrow(tissue)) {
+  a = tissue[,2][i]
+  b = paste("./GTEX_download/gene_tpm_2017-06-05_v8_", a, ".gct.gz", sep = "")
+  dat.gct <- read.delim(file=b, skip=2)
+  c = rowMeans(dat.gct[,-c(1:3)])
+  d = dat.gct[,c(3)]
+  data = cbind(d, c)
+  colnames(data) = c("Gene","Expression_mean")
+  write.table(data, file = paste("./GTEX_download/Data_processed/meanExp_", a, ".txt", sep = ""))
+}
+
+
+# subset all epilepsy genes
+
+gene = read.csv(file = "gene_epilepsy_final.csv")
+gene = gene[,-1]
+names(gene) <- c("Gene", "Group")
+
+for (i in 1:nrow(tissue)) {
+  a = tissue[,2][i]
+  b = paste("./GTEX_download/Data_processed/meanExp_", a, ".txt", sep = "")
+  c = read.table(b, sep = " ")
+  d = left_join(gene, c)
+  write.table(d, file = paste("./GTEX_download/epilepsygenes/epilepsy_meanExp_", a, ".txt", sep = ""))
+}
+
+
+# combine
+dat = data.frame(id = c(1:230))
+for (i in 1: nrow(tissue)){
+  a = tissue[,2][i]
+  b2 = paste("./GTEX_download/epilepsygenes/epilepsy_meanExp_", a, ".txt", sep = "") 
+  c = read.table(b2,sep = " ")
+  dat = cbind(dat, c[,3])
+}
+
+dat = data.frame(gene, dat[,-1])
+colnames(dat) <- c("Gene", "Group", as.character(tissue[,2]))
+
+write.csv(dat, file = "./GTEx_meanExp_sum.csv")
+
+```
+
+
+# heatmap (old)
+
+```{r,warning=FALSE}
+
+set.seed(2023.9)
+rm(list=ls())
+
+data <- read.csv(file = "GTEx_meanExp_sum.csv")
+
+data <- data[,-c(1, 25:26)] # remove unnecessary columns
+
+data <- data %>%
+        filter (Group %in% c("CEG", "DEEG", "SRG"))
+
+
+data[data == 0] <- NA
+data <- na.omit(data) 
+
+meta <- data$Group
+
+heat <- as.matrix(data[,-c(1,2)])
+heat <- log2(heat)
+
+#set color scheme and choose breaks
+
+myCol <- colorRamp2(c(min(heat), median(heat), max(heat)), c("#0570b0", "white", "#d7301f")) 
+
+#create annotation: gene labels
+ genelabels <- rowAnnotation(
+       Genes = anno_mark(
+       at = seq(1, nrow(heat), 1),
+       labels = data$Gene[seq(1, nrow(heat), 1)],
+       labels_gp = gpar(fontsize = 2.3),
+       padding = 0.5),
+       width = unit(1, 'cm') )
+
+col_dend = dendsort(hclust(dist(t(heat)), method = "ward.D2"), isReverse = FALSE, type="average")
+
+
+
+# creat heatmap object
+ht_list = Heatmap(heat,
+          col = myCol,
+          name = "Expression",
+          row_title = NULL,
+          cluster_rows = FALSE,
+          column_title = NULL,
+          cluster_columns = col_dend,
+          show_column_dend = TRUE,
+          show_column_names = TRUE,
+          column_names_gp = gpar(fontsize = 6),
+          show_parent_dend_line = TRUE,
+          clustering_method_rows = 'ward.D2',
+          show_heatmap_legend = TRUE,
+          heatmap_legend_param = list(
+                                 title = "Expression", 
+                                 at = c(min(heat), median(heat), max(heat)), 
+                                 title_gp = gpar(fontsize = 9),
+                                 labels = c("low", "median", "high"),
+                                 labels_gp = gpar(fontsize = 8),
+                                 legend_height = unit(2, "cm"),
+                                 legend_width = unit(0.5, "cm")
+                                  )
+         ) +
+        Heatmap(meta, 
+                col = c('#ffb60f','#c13832', '#673bb8'),
+                name = "Group", 
+                width = unit(4, "mm"),
+                show_column_names = FALSE,
+                show_heatmap_legend = TRUE,
+                heatmap_legend_param = list(
+                                       title = "Group",
+                                       title_gp = gpar(fontsize = 9),
+                                       labels_gp = gpar(fontsize = 8),
+                                       legend_height = unit(2, "cm"),
+                                       legend_width = unit(0.5, "cm")
+                                       )
+        )
+
+
+png(file = "./plot/GTEx.png", width = 6, height = 6.8, units = "in", res = 300)
+draw(ht_list, main_heatmap = "Expression", heatmap_legend_side = "right", annotation_legend_side = "right")
+
+dev.off()
+
+```
+
+
+# heatmap (new)
+
+```{r,warning=FALSE}
+
+set.seed(2023.9)
+rm(list=ls())
+
+#read data
+data <- read.csv(file = "GTEx_meanExp_sum.csv")
+
+data <- data[,-c(1, 25:26)] # remove unnecessary columns
+
+data <- data %>%
+        filter (Group %in% c("CEG", "DEEG", "SRG"))
+
+
+data[data == 0] <- NA
+data <- na.omit(data) 
+
+meta <- data$Group
+
+heat <- as.matrix(data[,-c(1,2)])
+heat <- log2(heat)
+
+#set color scheme
+
+myCol <- colorRamp2(c(min(heat), median(heat), max(heat)), c("#0570b0", "white", "#d7301f")) 
+
+#create annotation: gene labels
+ genelabels <- rowAnnotation(
+       Genes = anno_mark(
+       at = seq(1, nrow(heat), 5),
+       labels = data$Gene[seq(1, nrow(heat), 5)],
+       labels_gp = gpar(fontsize = 2.3),
+       padding = 0.5),
+       width = unit(1, 'cm') )
+
+
+#row_dend = dendsort(hclust(dist(heat), method = "ward.D2"), type = "average")
+col_dend = dendsort(hclust(dist(t(heat)), method = "ward.D2"), isReverse = FALSE, type="average")
+
+
+# creat heatmap object
+main =  Heatmap(heat,
+          col = myCol,
+          name = "Expression",
+          row_title = NULL,
+          cluster_rows = TRUE,
+          #row_split = meta, 
+          column_title = NULL,
+          cluster_columns = col_dend,
+          show_column_dend = TRUE,
+          show_column_names = TRUE,
+          column_names_gp = gpar(fontsize = 6),
+          show_parent_dend_line = TRUE,
+          clustering_method_rows = 'ward.D2',
+          show_heatmap_legend = TRUE,
+          heatmap_legend_param = list(
+                                 title = "Expression", 
+                                 at = c(min(heat), median(heat), max(heat)), 
+                                 title_gp = gpar(fontsize = 9),
+                                 labels = c("low", "median", "high"),
+                                 labels_gp = gpar(fontsize = 8),
+                                 legend_height = unit(2, "cm"),
+                                 legend_width = unit(0.5, "cm")
+                                  )
+
+         ) +
+        Heatmap(meta, 
+                col = c('#ffb60f','#c13832', '#673bb8'),
+                name = "Group", 
+                width = unit(4, "mm"),
+                show_column_names = FALSE,
+                show_heatmap_legend = TRUE,
+                heatmap_legend_param = list(
+                                       title = "Group",
+                                       title_gp = gpar(fontsize = 9),
+                                       labels_gp = gpar(fontsize = 8),
+                                       legend_height = unit(2, "cm"),
+                                       legend_width = unit(0.5, "cm")
+                                       )
+        )
+
+png(file = "./plot/GTEx_clusteredrow.png", width = 6, height = 6.8, units = "in", res = 300)
+
+draw(main, heatmap_legend_side = "right", annotation_legend_side = "right")
+
+dev.off()
+
+```
+
+
+# calculate tissue mean
+
+```{r,echo=FALSE, warning=FALSE}
+rm(list=ls())
+
+#read data
+data <- read.csv(file = "GTEx_meanExp_sum.csv")
+
+data <- data[,-c(1, 25:26)] # remove unnecessary columns
+
+data <- data %>%
+        filter (Group %in% c("CEG", "DEEG", "SRG"))
+
+
+data[data == 0] <- NA
+data <- na.omit(data) 
+
+
+data_l <- data %>%
+          gather(3:ncol(data), key = "tissue", value = "expression")
+
+tissue = unique(data_l$tissue)
+
+  a = c("brain_cerebellar_hemisphere", "brain_cerebellum", "brain_cortex", "brain_frontal_cortex_ba9", "brain_anterior_cingulate_cortex_ba24", "brain_caudate_basal_ganglia", "brain_putamen_basal_ganglia", "brain_nucleus_accumbens_basal_ganglia", "brain_amygdala", "brain_hippocampus", "brain_hypothalamus", "brain_spinal_cord_cervical_c.1", "brain_substantia_nigra", "pituitary", "testis", "esophagus_gastroesophageal_junction", "esophagus_muscularis", "colon_transverse", "small_intestine_terminal_ileum", "colon_sigmoid", "stomach", "artery_aorta", "artery_tibial", "artery_coronary", "cervix_ectocervix", "cervix_endocervix", "uterus", "vagina","bladder","nerve_tibial","fallopian_tube","ovary","kidney_cortex", "kidney_medulla", "spleen", "adipose_subcutaneous", "adipose_visceral_omentum", "breast_mammary_tissue", "skin_not_sun_exposed_suprapubic", "skin_sun_exposed_lower_leg", "esophagus_mucosa", "minor_salivary_gland", "lung", "thyroid", "prostate",  "adrenal_gland",  "heart_atrial_appendage", "heart_left_ventricle", "muscle_skeletal", "pancreas", "liver","whole_blood")
+
+ave <- data_l %>%
+  filter(tissue %in% a) %>%
+  group_by(Group, tissue) %>%
+  summarise(
+    group_mean = mean(expression),
+    total = n(),
+    sd = sd(expression),
+    sem = sd / sqrt(total)
+  )
+
+
+
+ave$tissue = factor(ave$tissue, levels = a)
+
+f = ggplot(data = ave, aes(x = tissue, y = group_mean, group = Group)) +
+    geom_bar(stat ="identity", position = position_dodge(), aes(fill = Group)) +
+    scale_color_manual(values = c('#ffb60f','#c13832','#673bb8')) +
+    scale_fill_manual(values = c('#ffb60f','#c13832','#673bb8')) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.background = element_blank(),
+           axis.line = element_line(colour = "black",size=0.5),
+           axis.ticks = element_line(colour="black",size =0.5),
+           axis.title.x = element_blank(),
+           legend.position = "none",
+           axis.text=element_text(size=8),
+           axis.text.x =element_blank(),
+           axis.title=element_text(size=9)) +
+      ylab("Expression level")
+
+ggsave(file = "./plot/GTEx_cluster_Mean.png",width = 6, height = 2.5)  
+    
+```
+
+
+
+# calculate type mean
+
+```{r}
+rm(list=ls())
+#read data
+data <- read.csv(file = "GTEx_meanExp_sum.csv")
+
+data <- data[,-c(1, 25:26)] # remove unnecessary columns
+
+data <- data %>%
+        filter (Group %in% c("CEG", "DEEG", "SRG"))
+
+
+data[data == 0] <- NA
+data <- na.omit(data) 
+
+
+data_l <- data %>%
+          gather(3:ncol(data), key = "tissue", value = "expression")
+
+
+CNS <- c("brain_cerebellar_hemisphere", "brain_cerebellum", "brain_cortex", "brain_frontal_cortex_ba9", "brain_anterior_cingulate_cortex_ba24", "brain_caudate_basal_ganglia", "brain_putamen_basal_ganglia", "brain_nucleus_accumbens_basal_ganglia", "brain_amygdala", "brain_hippocampus", "brain_hypothalamus", "brain_spinal_cord_cervical_c.1", "brain_substantia_nigra", "pituitary")
+
+nonCNS <- c("testis", "esophagus_gastroesophageal_junction", "esophagus_muscularis", "colon_transverse", "small_intestine_terminal_ileum", "colon_sigmoid", "stomach", "artery_aorta", "artery_tibial", "artery_coronary", "adipose_subcutaneous", "adipose_visceral_omentum", "breast_mammary_tissue", "nerve_tibial", "cervix_ectocervix", "cervix_endocervix", "uterus", "bladder", "vagina", "prostate", "fallopian_tube", "ovary", "lung", "thyroid", "skin_not_sun_exposed_suprapubic", "skin_sun_exposed_lower_leg", "esophagus_mucosa", "minor_salivary_gland", "adrenal_gland", "kidney_cortex", "kidney_medulla", "spleen", "heart_atrial_appendage", "heart_left_ventricle", "muscle_skeletal", "liver", "pancreas", "whole_blood")
+
+
+a = ifelse(data_l$tissue %in% CNS, "CNS", "Non-CNS")
+data_l$class <- a
+
+
+# Plot by class
+ave <- data_l %>%
+  group_by(Group, class) %>%
+  summarise(
+    group_mean = mean(expression),
+    total = n(),
+    sd = sd(expression),
+    sem = sd / sqrt(total)
+  )
+
+ave$class = factor(ave$class, levels = c("CNS", "Non-CNS"))
+
+
+f = ggplot(data = ave, aes(x = class, y = group_mean, group = Group)) +
+    geom_errorbar(aes(ymin = group_mean-sem, ymax = group_mean+sem), position = position_dodge(), color = "gray") +
+    geom_bar(stat ="identity", position = position_dodge(), aes(fill = Group)) +
+    scale_color_manual(values = c('#ffb60f','#c13832','#673bb8')) +
+    scale_fill_manual(values = c('#ffb60f','#c13832','#673bb8')) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.background = element_blank(),
+           axis.line = element_line(colour = "black",size=0.5),
+           axis.ticks = element_line(colour="black",size =0.5),
+           axis.title.x = element_blank(),
+           legend.position = "none",
+           axis.text=element_text(size=8),
+           axis.title=element_text(size=9),
+           strip.text.x = element_text(size = 9)) +
+      ylab("Expression level")
+    
+      
+print(f)
+ggsave(file = "./plot/GTEx_class_mean.png",width = 3, height = 5) 
+
+
+# CNS
+CNS <- data_l %>% filter(class == "CNS")
+
+# Average to gene
+ave <- CNS %>%
+  group_by(Gene, Group) %>%
+  summarise(
+    group_mean = mean(expression),
+    total = n(),
+    sd = sd(expression),
+    sem = sd / sqrt(total)
+  )
+
+pairwise.wilcox.test(ave$group_mean, ave$Group, p.adjust.method = "BH")
+
+# Non-CNS
+nonCNS <- data_l %>% filter(class == "Non-CNS")
+
+# average to gene
+ave <- nonCNS %>%
+  group_by(Gene, Group) %>%
+  summarise(
+    group_mean = mean(expression),
+    total = n(),
+    sd = sd(expression),
+    sem = sd / sqrt(total)
+  )
+
+pairwise.wilcox.test(ave$group_mean, ave$Group, p.adjust.method = "BH")
+```
+
+
+
+# calculate group mean
+
+```{r}
+rm(list=ls())
+#read data
+data <- read.csv(file = "GTEx_meanExp_sum.csv")
+
+data <- data[,-c(1, 25:26)] # remove unnecessary columns
+
+data <- data %>%
+        filter (Group %in% c("CEG", "DEEG", "SRG"))
+
+
+data[data == 0] <- NA
+data <- na.omit(data) 
+
+
+data_l <- data %>%
+          gather(3:ncol(data), key = "tissue", value = "expression")
+
+CNS <- c("brain_cerebellar_hemisphere", "brain_cerebellum", "brain_cortex", "brain_frontal_cortex_ba9", "brain_anterior_cingulate_cortex_ba24", "brain_caudate_basal_ganglia", "brain_putamen_basal_ganglia", "brain_nucleus_accumbens_basal_ganglia", "brain_amygdala", "brain_hippocampus", "brain_hypothalamus", "brain_spinal_cord_cervical_c.1", "brain_substantia_nigra", "pituitary")
+
+nonCNS <- c("testis", "esophagus_gastroesophageal_junction", "esophagus_muscularis", "colon_transverse", "small_intestine_terminal_ileum", "colon_sigmoid", "stomach", "artery_aorta", "artery_tibial", "artery_coronary", "adipose_subcutaneous", "adipose_visceral_omentum", "breast_mammary_tissue", "nerve_tibial", "cervix_ectocervix", "cervix_endocervix", "uterus", "bladder", "vagina", "prostate", "fallopian_tube", "ovary", "lung", "thyroid", "skin_not_sun_exposed_suprapubic", "skin_sun_exposed_lower_leg", "esophagus_mucosa", "minor_salivary_gland", "adrenal_gland", "kidney_cortex", "kidney_medulla", "spleen", "heart_atrial_appendage", "heart_left_ventricle", "muscle_skeletal", "liver", "pancreas", "whole_blood")
+
+
+a = ifelse(data_l$tissue %in% CNS, "CNS", "Non-CNS")
+data_l$class <- a
+
+# Plot by group
+ave <- data_l %>%
+  group_by(Group, class) %>%
+  summarise(
+    group_mean = mean(expression),
+    total = n(),
+    sd = sd(expression),
+    sem = sd / sqrt(total)
+  )
+
+ave$Group = factor(ave$Group, levels = c("CEG", "DEEG", "SRG"))
+
+
+f = ggplot(data = ave, aes(x = Group, y = group_mean, group = class)) +
+    geom_errorbar(aes(ymin = group_mean-sem, ymax = group_mean+sem), position = position_dodge(), color = "gray") +
+    geom_bar(stat ="identity", position = position_dodge(), aes(color = class, fill = Group, size = 0.5)) +
+    scale_color_manual(values = c('#018571','#a6611a')) +
+    scale_fill_manual(values = c('#ffb60f','#c13832','#673bb8')) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.background = element_blank(),
+           axis.line = element_line(colour = "black",size=0.5),
+           axis.ticks = element_line(colour="black",size =0.5),
+           axis.title.x = element_blank(),
+           legend.position = "none",
+           axis.text=element_text(size=8),
+           axis.title=element_text(size=9),
+           strip.text.x = element_text(size = 9)) + 
+      ylab("Expression level")
+    
+
+ggsave(file = "./plot/GTEx_group_mean.png",width = 3, height = 5) 
+
+
+#### stat by group
+#CEG
+CEG = data_l %>%
+    filter (Group == "CEG")
+
+#average to gene
+ave = CEG %>%
+      group_by(Gene, class) %>%
+      summarise(group_mean = mean(expression), total = n(), sd = sd(expression), sem = sd/sqrt(total))
+
+pairwise.wilcox.test(ave$group_mean,ave$class)
+                
+
+
+#DEEG
+DEEG = data_l %>%
+    filter (Group == "DEEG")
+
+#average to gene
+ave = DEEG %>%
+      group_by(Gene,class) %>%
+      summarise(group_mean = mean(expression), total = n(), sd = sd(expression), sem = sd/sqrt(total))
+
+pairwise.wilcox.test(ave$group_mean,ave$class) 
+
+
+#SRG
+SRG = data_l %>%
+    filter (Group == "SRG")
+
+#average to gene
+ave = SRG %>%
+      group_by(Gene,class) %>%
+      summarise(group_mean = mean(expression), total = n(), sd = sd(expression), sem = sd/sqrt(total))
+
+pairwise.wilcox.test(ave$group_mean,ave$class) 
+```
+
+
+##############plot ten most studied genes
+
+
+# get expression data for 10 genes (only need to run once)
+
+```{r,echo=FALSE, warning=FALSE}
+rm(list=ls())
+dir.create("./top10/")
+dir.create("./top10/raw")
+dir.create("./top10/process")
+
+
+list_exp = list.files(path = "./GTEX_downlaad/", pattern = ".gct.gz")
+tissue = read.csv("./GTEX_download/tissuenames.csv")
+
+topgene = c("CHRNA4", "CSTB", "DEPDC5", "EPM2A", "KCNQ2", "KCNT1", "SCN1A", "SCN2A", "SCN8A", "KCNA2")
+
+#gene data from all tissues
+topgene_exp = data.frame()
+for (i in 1:nrow(tissue)) {
+  a = tissue[,2][i]
+  b = paste("./GTEX_download/gene_tpm_2017-06-05_v8_", a, ".gct.gz", sep = "")
+  dat.gct <- read.delim(file=b, skip=2)
+  d0 = dat.gct %>%
+      filter (Description %in% topgene)
+  t = rep(a, length(topgene))
+  d = cbind(t,d0)
+  write.table(d, file = paste("./top10/raw/", a, ".txt", sep = ""))
+}
+
+```
+
+#organize data to plot
+
+```{r}
+for (j in 1:length(topgene)) {
+  g = topgene[j]
+  gene = data.frame()
+  for (i in 1:nrow(tissue)) {
+    a = tissue[,2][i]
+    b = paste("./top10/raw/", a, ".txt", sep = "")
+    c = read.table(b, sep = " ")
+    d0 = subset(c, Description == g)
+    d0 = d0[,-c(2:3)]
+    d1 = d0 %>%
+         tidyr::gather (3:ncol(d0), key = ID, value = exp)
+    gene = rbind(gene, d1)
+  }
+   write.table(gene, file = paste("./top10/process/", g, ".txt", sep = ""))
+}
+
+
+#plot
+
+for (j in 1:length(topgene)) {
+  g = topgene[j]
+  
+  path = paste("./top10/process/", g, ".txt", sep = "")
+  data = read.table(path)
+  
+  a = c("brain_cerebellar_hemisphere", "brain_cerebellum", "brain_cortex", "brain_frontal_cortex_ba9", "brain_anterior_cingulate_cortex_ba24", "brain_caudate_basal_ganglia", "brain_putamen_basal_ganglia", "brain_nucleus_accumbens_basal_ganglia", "brain_amygdala", "brain_hippocampus", "brain_hypothalamus", "brain_spinal_cord_cervical_c.1", "brain_substantia_nigra", "pituitary", "testis", "esophagus_gastroesophageal_junction", "esophagus_muscularis", "colon_transverse", "small_intestine_terminal_ileum", "colon_sigmoid", "stomach", "artery_aorta", "artery_tibial", "artery_coronary", "cervix_ectocervix", "cervix_endocervix", "uterus", "vagina","bladder","nerve_tibial","fallopian_tube","ovary","kidney_cortex", "kidney_medulla", "spleen", "adipose_subcutaneous", "adipose_visceral_omentum", "breast_mammary_tissue", "skin_not_sun_exposed_suprapubic", "skin_sun_exposed_lower_leg", "esophagus_mucosa", "minor_salivary_gland", "lung", "thyroid", "prostate",  "adrenal_gland",  "heart_atrial_appendage", "heart_left_ventricle", "muscle_skeletal", "pancreas", "liver","whole_blood")
+
+  data = data %>%
+         filter (t %in% a)
+  
+  data$t <- factor(data$t, levels = a)
+
+  f = ggplot(data, aes(x = t, y = exp)) +
+      geom_boxplot() +
+  
+      theme_bw() +
+      theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.background = element_blank(),
+           axis.line = element_line(colour = "black",size=0.5),
+           axis.ticks = element_line(colour="black",size =0.5),
+           axis.title.x = element_blank(),
+           legend.position = "none",
+           axis.text.x =  element_text(size=6, angle = 90, vjust = 0.5, hjust=1),
+           axis.text.y = element_text(size=8)) +
+        ylab("Expression level") +
+        ggtitle(g)
+  
+  path = paste("./plot/Top10_", g, "_GTEx.png", sep = "")
+  ggsave(f, file = path, width = 6, height = 5)
+}
+```
+
+
+
+
+####################################################################################
+########################Developmental stages #######################################
+####################################################################################
+
+
+###############################################
+==============================================
+BrainSpan: Atlas of the Developing Human Brain
+==============================================
+
+This data set contains RNA-Seq RPKM (reads per kilobase per million; see the whitepaper at
+www.brainspan.org) values averaged to genes.
+
+expression_matrix.csv -- the rows are genes and the columns samples; the first column is the row number
+rows_metadata.csv -- the genes are listed in the same order as the rows in expression_matrix.csv
+columns_metadata.csv -- the samples are listed in the same order as the columns in expression_matrix
+################################################
+
+
+#downloaded data mannually from https://www.brainspan.org/api/v2/well_known_file_download/267666525
+
+#expression
+
+
+```{r}
+rm(list=ls())
+# expression data
+expression <- read.csv("./development/datadownloaded/expression_matrix.csv", header = FALSE)
+
+#read meta data
+row <- read.csv("./development/datadownloaded/rows_metadata.csv")
+column <- read.csv("./development/datadownloaded/columns_metadata.csv")
+
+
+# COMBINE
+dat = data.frame(row, expression[,-1])
+
+# select epilepsy genes
+gene = read.csv(file = "gene_epilepsy_final.csv")
+gene = gene[,-1]
+colnames(gene) <- c("gene_symbol", "Group")
+gene = subset(gene, Group %in% c("CEG", "DEEG", "SRG"))
+
+dat_epi <- left_join(gene, dat)
+dat_epi = na.omit(dat_epi)
+
+dat_epi_l <- dat_epi %>%
+             gather("column_num", "value", 7:ncol(dat_epi))
+
+dat_epi_l$column_num <- gsub("V", "", dat_epi_l$column_num)
+dat_epi_l$column_num <- as.numeric(dat_epi_l$column_num)-1
+
+# add age info
+
+dat_f = left_join(dat_epi_l, column)
+
+write.csv(dat_f, file = "development.csv")
+```
+
+
+
+#########################
+######group into 5 groups
+#########################
+
+```{r}
+rm(list=ls())
+data = read.csv("development.csv")
+
+Prenatal = c("8 pcw",  "9 pcw", "12 pcw", "13 pcw", "16 pcw", "17 pcw", "19 pcw", "21 pcw", "24 pcw", "25 pcw", "26 pcw", "35 pcw", "37 pcw")
+Infancy = c("4 mos", "10 mos", "1 yrs")
+Childhood = c("2 yrs", "3 yrs", "4 yrs", "1 yrs", "8 yrs", "11 yrs")
+Adolescence = c("13 yrs", "15 yrs", "18 yrs", "19 yrs")
+Adulthood = c("21 yrs", "23 yrs", "30 yrs", "36 yrs", "37 yrs", "40 yrs")
+
+for (i in 1: nrow(data)) {
+  if (data$age[i] %in% Prenatal) {
+    data$Stage[i] <- "Prenatal"
+  }else if (data$age[i] %in% Infancy) {
+    data$Stage[i] <- "Infancy"
+  }else if (data$age[i] %in% Childhood) {
+    data$Stage[i] <- "Childhood"
+  }else if (data$age[i] %in% Adolescence) {
+    data$Stage[i] <- "Adolescence"
+  }else if (data$age[i] %in% Adulthood) {
+    data$Stage[i] <- "Adulthood"
+  }else {
+     data$Stage[i] <- "TBD"
+  }
+}
+
+write.table(data, file = "development_Biggroup.txt", sep = ",")
+
+```
+
+## area
+
+```{r, warnings=FALSE}
+options(dplyr.summarise.inform = FALSE)
+
+rm(list = ls())
+
+if (!dir.exists("./development/dataProcessed/")){
+  dir.create("./development/dataProcessed/")
+}
+
+
+data = read.table(file = "development_Biggroup.txt", sep = ",")
+data = data[,-1]
+
+area = names(table(data$structure_acronym))
+write.csv(area, file = "./development/arealist.csv")
+
+for (j in 1: length(area)) {
+  #select area and get mean value
+  data_ave= na.omit(data) %>%
+           filter (structure_acronym == area[j]) %>%
+           group_by (Group, gene_symbol, Stage) %>%
+           summarise(ave= ave(value))
+    
+  data_ave = unique(data_ave)
+
+  write.csv(data_ave, file = paste("./development/dataProcessed/",area[j], "_Biggroup.csv", sep =""))
+}
+```
+
+
+
+#heatmap
+
+```{r}
+set.seed(2023)
+rm(list = ls())
+
+area = read.csv(file = "./development/arealist.csv")
+area = area[,-1]
+area = area[-c(3, 5, 7, 11, 13, 16, 17, 19, 23, 24)] # remove tissues with sparse data
+length(area)
+
+ 
+
+for (i in 1: length(area)) {
+    path = paste("./development/dataProcessed/", area[i], "_Biggroup.csv", sep = "")
+    print(path)
+    dat = read.csv(path)
+    dat= dat[,-1] 
+    dat_w = spread(dat, key = Stage, value = ave)
+    dat_w[dat_w == 0] <- NA
+    dat_w = na.omit(dat_w)
+    area0 =area[i]
+    Group = dat_w[,1]
+    gene = dat_w[,2]
+    Stage = unique(dat$Stage)
+    Stage = c("Prenatal", "Infancy", "Childhood", "Adolescence", "Adulthood")
+    
+    heat = as.matrix(dat_w[,-c(1:2)])
+    heat = log2(heat)
+
+    #create annotation: gene labels
+    genelabels <- rowAnnotation(
+          Genes = anno_mark(
+          at = seq(1, nrow(heat), 1),
+          labels = gene[seq(1, nrow(heat), 1)],
+          labels_gp = gpar(fontsize = 2.5),
+          padding = 0.5),
+          width = unit(1, 'cm') +
+ 
+          max_text_width(
+            rownames(heat)[seq(1, nrow(heat), 5)],
+            gp = gpar(fontsize = 4.5)))
+  
+    #set color scheme and choose breaks
+    myCol <- colorRamp2(c(min(heat), median(heat), max(heat)), c("#008837", "white", "#7b3294"))
+   
+    row_dend = dendsort(hclust(dist(heat)), isReverse = FALSE, type="average")
+
+
+# creat heatmap object
+ht_list = Heatmap(heat,
+          col = myCol,
+          name = "Expression",
+          row_gap = unit(1, "mm"), 
+          column_gap = unit(1, "mm"),
+          row_title = NULL,
+          cluster_rows = TRUE,
+          column_title = NULL,
+          cluster_columns = FALSE,
+          show_column_dend = TRUE,
+          show_column_names = TRUE, #FALSE FOR SUPPLEMENTAL
+          column_names_gp = gpar(fontsize = 10),
+          column_names_rot = 30,
+          column_order = Stage,
+          clustering_method_rows = 'ward.D2',
+          show_heatmap_legend = TRUE,#FALSE FOR SUPPLEMENTAL
+          heatmap_legend_param = list(
+                                 title = "Expression", 
+                                 at = c(min(heat), median(heat), max(heat)), 
+                                 title_gp = gpar(fontsize = 10),
+                                 labels = c("low", "median", "high"),
+                                 labels_gp = gpar(fontsize = 8),
+                                 legend_height = unit(2, "cm"),
+                                 legend_width = unit(0.5, "cm")
+                                  )
+         ) +
+        Heatmap(Group, 
+                col = c('#ffb60f','#c13832','#673bb8'), 
+                name = "Group", 
+                width = unit(2, "mm"),
+                show_column_names = FALSE,
+                show_heatmap_legend = TRUE,#FALSE FOR SUPPLEMENTAL
+                heatmap_legend_param = list(
+                                       title = "Group",
+                                       title_gp = gpar(fontsize = 10),
+                                       #labels = c("CEG", "DEEG", "SRG"),
+                                       #labels = c("CEG", "DEEG", "SRG", "CEG & DEEG", "CEG & SRG", "DEEG & SRG"),
+                                       labels_gp = gpar(fontsize = 7),
+                                       legend_height = unit(2, "cm"),
+                                       legend_width = unit(0.5, "cm")
+                                       )
+        )
+
+png(filename = paste("./plot/development", area0, ".png", sep = ""), width = 3.4, height = 3.4, units = "in", res = 300)
+draw(ht_list, main_heatmap = "Expression", heatmap_legend_side = "left", annotation_legend_side = "left")
+
+dev.off()
+          
+}
+
+```
+
+
+# calculate mean values_hip
+
+```{r, warning=FALSE}
+data = read.csv("./development/dataProcessed/HIP_Biggroup.csv", sep = ",")
+data = data[,-1]
+
+
+ave = data %>%
+      group_by(Group, Stage) %>%
+      summarise (group_mean = mean(ave), total = n(), sd = sd(ave), sem = sd/sqrt(total))
+ave$Stage = factor(ave$Stage, levels = c("Prenatal", "Infancy", "Childhood", "Adolescence", "Adulthood"))
+
+f = ggplot(data = ave, aes(x = Stage, y = group_mean, group = Group)) +
+    geom_point(aes(colour = Group), size = 3) +
+    geom_smooth(aes(colour = Group), size = 1.5) +
+    scale_color_manual(values = c('#ffb60f','#c13832','#673bb8')) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.border = element_blank(),
+           panel.background = element_blank(),
+           axis.line = element_line(colour = "black",size=1),
+           axis.ticks = element_line(colour="black",size =1.2),
+           axis.title.x = element_blank(),
+           legend.position = "none",
+           axis.text=element_text(size=15),
+           axis.title=element_text(size=25)) + 
+      ylab("Expression")
+ggsave(file = "./plot/development_HIP_mean.pdf",width = 5, height = 3)  
+  
+
+```
+
+# mean_batch
+
+```{r, warning=FALSE}
+set.seed(2023)
+rm(list = ls())
+
+area = read.csv(file = "./development/arealist.csv")
+area = area[,-1]
+area = area[-c(3, 5, 7, 11, 13, 16, 17, 19, 23, 24)] # remove tissues with sparse data
+length(area)
+
+ 
+for (i in 1: length(area)) {
+    area0 =area[i]
+    path = paste("./development/dataProcessed/", area0, "_Biggroup.csv", sep = "")
+    print(path)
+    data = read.csv(path)
+    data= data[,-1] 
+    ave = data %>%
+      group_by(Group, Stage) %>%
+      summarise (group_mean = mean(ave), total = n(), sd = sd(ave), sem = sd/sqrt(total))
+ave$Stage = factor(ave$Stage, levels = c("Prenatal", "Infancy", "Childhood", "Adolescence", "Adulthood"))
+
+f = ggplot(data = ave, aes(x = Stage, y = group_mean, group = Group)) +
+    geom_smooth(aes(colour = Group), size = 1.5) +
+    scale_color_manual(values = c('#ffb60f','#c13832','#673bb8')) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.background = element_blank(),
+           axis.line = element_line(colour = "black",size=1),
+           axis.ticks = element_line(colour="black",size =1.2),
+           axis.title.x = element_blank(),
+           axis.text.x = element_blank(),
+           legend.position = "none",
+           axis.text=element_text(size=15),
+           axis.title=element_text(size=15)) +
+      ylab("Expression")
+
+
+ggsave(filename = paste("./plot/development_", area0, "_mean_batch.png", sep = ""), width = 5, height = 3)  
+}
+
+```
+
+# statistical analyses
+
+```{r}
+data = read.table(file = "development_Biggroup.txt", sep = ",")
+data = data[,-1]
+
+stage = c("Adulthood", "Adolescence", "Childhood", "Infancy", "Prenatal")
+
+area = read.csv(file = "./development/arealist.csv")
+area = area[,-1]
+region = area[-c(3, 5, 7, 11, 13, 16, 17, 19, 23, 24)] # remove tissues with sparse data
+length(region)
+
+
+
+for (i in 1:length(stage)) {
+  s <- stage[i]
+  data1 <- data %>%
+    filter(Stage == s)
+  for (j in 1:length(region)) {
+    r <- region[j]
+    data2 <- data1 %>%
+      filter(structure_acronym == r)
+    data2_mean <- data2 %>%
+      group_by(gene_symbol, Group) %>%
+      summarise(gene_mean = mean(value))
+    t <- pairwise.wilcox.test(data2_mean$gene_mean, data2_mean$Group, p.adjust.method = "BH")
+    p0 <- t$p.value
+    write.csv(p0, file = paste("./development/pvalue/", s, "_", r, ".csv", sep = ""))
+  }
+}
+
+#sum
+list = list.files("./development/pvalue/", pattern = ".csv")
+
+pvalue = data.frame()
+for (i in 1: length(list)){
+  l = list[i]
+  a = gsub(".csv", "", l)
+  b = strsplit(a, "_")
+  stage = b[[1]][1]
+  region = b[[1]][2]
+  s_r = a
+  path = paste("./development/pvalue/", l, sep = "")
+  d0 = read.csv(path)
+  DEEG_SRG = d0[2,3]
+  DEEG_CEG = d0[1,2]
+  CEG_SRG = d0[2,2]
+  all = cbind(region, stage, s_r, DEEG_SRG, DEEG_CEG, CEG_SRG)
+  pvalue = rbind(pvalue, all)
+}
+
+write.csv(pvalue, file ="development_pvalue_sum.csv")
+
+#plot
+
+data_l <- pvalue %>%
+          gather(4:6, key = term, value= pvalue) 
+data_l$pvalue <- as.numeric(data_l$pvalue)
+
+l1 = 0.05
+l2 = 0.01
+l3 = 0.001
+l4 = 0.0001
+
+for (i in 1: nrow(data_l)) {
+  if (data_l$pvalue[i] > l1) {
+    data_l$color[i] <- "ns"
+  }else if (data_l$pvalue[i] < l1 && data_l$pvalue[i] >= l2) {
+    data_l$color[i] <- "one"
+  }else if (data_l$pvalue[i] < l2 && data_l$pvalue[i] >= l3) {
+    data_l$color[i] <- "two"
+  }else if (data_l$pvalue[i] < l3 && data_l$pvalue[i] >= l4) {
+    data_l$color[i] <- "three"
+  }else if (data_l$pvalue[i] < l4) {
+    data_l$color[i] <- "four"
+  }
+}
+
+data_l$color <- factor(data_l$color, levels = c("ns", "one", "two", "three", "four"))
+
+f = ggplot(data= data_l, aes(y = s_r, x = term, fill = color)) +
+    geom_tile(color = "black") +
+    scale_fill_manual(values = c(ns = "#FFFFFF", one = "#ffffd4",
+                       two = "#fed98e",
+                       three = "#fe9929",
+                       four = "#cc4c02")) +
+    scale_x_discrete(labels=c('CEG vs. SRG', 'DEEG vs. CEG', 'DEEG vs. SRG')) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.background = element_blank(),
+           axis.line = element_line(colour = "black",size=1),
+           axis.ticks = element_line(colour="black",size =1.2),
+           axis.title.x = element_blank(),
+           legend.position = "none",
+           axis.text=element_text(size=8),
+           axis.title=element_text(size=10)) + 
+      ylab("Stage_Region")
+ggsave(f, file = "./plot/development_pvalue.png", width = 5, height = 10)
+
+```
+
+
+# plot ten most studied genes
+
+```{r}
+rm(list=ls())
+# expression data
+expression <- read.csv("./development/datadownloaded/expression_matrix.csv", header = FALSE)
+
+#read meta data
+row <- read.csv("./development/datadownloaded/rows_metadata.csv")
+column <- read.csv("./development/datadownloaded/columns_metadata.csv")
+
+
+# COMBINE
+dat = data.frame(row, expression[,-1])
+
+# select top10 genes
+gene = c("CHRNA4", "CSTB", "DEPDC5", "EPM2A", "KCNQ2", "KCNT1", "SCN1A", "SCN2A", "SCN8A", "KCNA2")
+
+dat = subset(dat, dat$gene_symbol %in% gene)
+
+
+dat_epi_l <- dat %>%
+             gather("column_num", "value", 7:ncol(dat))
+
+dat_epi_l$column_num <- gsub("V", "", dat_epi_l$column_num)
+dat_epi_l$column_num <- as.numeric(dat_epi_l$column_num)-1
+
+# add age info
+
+data = left_join(dat_epi_l, column)
+
+Prenatal = c("8 pcw",  "9 pcw", "12 pcw", "13 pcw", "16 pcw", "17 pcw", "19 pcw", "21 pcw", "24 pcw", "25 pcw", "26 pcw", "35 pcw", "37 pcw")
+Infancy = c("4 mos", "10 mos", "1 yrs")
+Childhood = c("2 yrs", "3 yrs", "4 yrs", "1 yrs", "8 yrs", "11 yrs")
+Adolescence = c("13 yrs", "15 yrs", "18 yrs", "19 yrs")
+Adulthood = c("21 yrs", "23 yrs", "30 yrs", "36 yrs", "37 yrs", "40 yrs")
+
+for (i in 1: nrow(data)) {
+  if (data$age[i] %in% Prenatal) {
+    data$Stage[i] <- "Prenatal"
+  }else if (data$age[i] %in% Infancy) {
+    data$Stage[i] <- "Infancy"
+  }else if (data$age[i] %in% Childhood) {
+    data$Stage[i] <- "Childhood"
+  }else if (data$age[i] %in% Adolescence) {
+    data$Stage[i] <- "Adolescence"
+  }else if (data$age[i] %in% Adulthood) {
+    data$Stage[i] <- "Adulthood"
+  }else {
+     data$Stage[i] <- "TBD"
+  }
+}
+
+
+#
+area = read.csv(file = "./development/arealist.csv")
+area = area[,-1]
+region = area[-c(3, 5, 7, 11, 13, 16, 17, 19, 23, 24)] # remove tissues with sparse data
+
+dat = data %>%
+       filter(structure_acronym %in% region)
+
+for (j in 1:length(gene)) {
+  g = gene[j]
+  dat0 = dat %>%
+         filter (gene_symbol == g)
+  
+  dat0$Stage <- factor(dat0$Stage, levels = c("Prenatal", "Infancy", "Childhood", "Adolescence", "Adulthood"))
+
+  f = ggplot(dat0, aes(x = Stage, y = value)) +
+      geom_boxplot() +
+      facet_wrap(.~structure_acronym, nrow = 4) +
+      theme_bw() +
+      theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.background = element_blank(),
+           axis.line = element_line(colour = "black",size=0.5),
+           axis.ticks = element_line(colour="black",size =0.5),
+           axis.title.x = element_blank(),
+           legend.position = "none",
+           axis.text.y =element_text(size=8),
+           axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+           strip.text.x = element_text(size = 10)) + #panel label fontsize
+        ylab("Expression level") +
+        ggtitle(g)
+  
+  path = paste("./plot/development_", g, "_box.png", sep = "")
+  ggsave(f, file = path, width = 6.8, height = 6.8)
+}
+```
+
+
+
+####################################################################################
+########################Single cell data#######################################
+####################################################################################
+
+Download the human single cell data from
+[Allen Institute for Brain Science](https://portal.brain-map.org/atlases-and-data/rnaseq/human-multiple-cortical-areas-smart-seq).
+
+#################################download data
+
+
+```{r, echo=FALSE, warning=FALSE}
+rm(list=ls())
+dir.create("sc")
+
+
+#1. download reference genome files (.gtf)
+url <- "http://celltypes.brain-map.org/api/v2/well_known_file_download/502175284"
+
+destfile <- "./sc/reference.gtf"
+
+download.file(url, destfile)
+
+
+#2. download general data
+
+#Readme file
+url1 <- "https://brainmapportal-live-4cc80a57cd6e400d854-f7fdcae.divio-media.net/filer_public/30/80/30803016-9515-45fd-a6af-8595902c176f/readme_human_ctx.txt"
+
+destfile1 <- "./sc/readme.txt"
+
+download.file(url1, destfile1)
+
+#table of cell metadata
+url2 <- "https://idk-etl-prod-download-bucket.s3.amazonaws.com/aibs_human_ctx_smart-seq/metadata.csv"
+
+destfile2 <- "./sc/metadata.csv"
+
+download.file(url2, destfile2)
+
+#table of cell metata_MTG
+
+url2 <- "https://github.com/AllenInstitute/nomenclature/raw/master/data/cell_metadata_MTG.csv"
+
+destfile2 <- "./sc/metadata_MTG.csv"
+
+download.file(url2, destfile2)
+
+
+#2D coordinates
+url3 <- "https://idk-etl-prod-download-bucket.s3.amazonaws.com/aibs_human_ctx_smart-seq/tsne.csv"
+
+destfile3 <- "./sc/2D.coordinates.csv"
+
+download.file(url3, destfile3)
+
+#sample ID mapping
+url4 <- "https://brainmapportal-live-4cc80a57cd6e400d854-f7fdcae.divio-media.net/filer_public/b1/9f/b19f5e10-c6b2-4cf4-80fc-182e69a4511f/sample-exp_component_mapping_human_smart-seq_oct_2019.zip"
+
+destfile4 <- "./sc/sampleIDmapping.csv"
+
+download.file(url4, destfile4)
+
+# 4. download cell types taxonomy
+
+#taxonomy of cell types
+
+url1 <- "https://idk-etl-prod-download-bucket.s3.amazonaws.com/aibs_human_ctx_smart-seq/dend.json"
+
+destfile1 <- "./sc/celltype.json"
+
+download.file(url1, destfile1)
+
+#taxonomy information
+
+url2 <- "https://transcriptomic-viewer-downloads.s3-us-west-2.amazonaws.com/human/taxonomy.zip"
+
+destfile2 <- "./sc/taxinfo.txt"
+
+download.file(url2, destfile2)
+
+```
+
+
+#3. download gene expression data
+
+```{bash}
+
+#gene expression matrix 
+
+wget "https://idk-etl-prod-download-bucket.s3.amazonaws.com/aibs_human_ctx_smart-seq/matrix.csv"
+
+```
+
+
+
+
+#########################################
+############Read data into R#############
+#########################################
+
+```{r}
+rm(list=ls())
+#1. read expression data 
+expression<- readr::read_csv("matrix.csv")
+
+#2. read meta data
+metaData= read.csv("./sc/metadata.csv")
+metaData = data.frame(metaData)
+
+```
+
+
+#################################################
+############subset data for analysis#############
+#################################################
+
+```{r, warning=FALSE}
+##############################
+#################Core epilepsy gene
+##############################
+
+epilepsy <- read.csv("gene_epilepsy_final.csv")
+grp = epilepsy %>%
+       dplyr::filter(grp == "CEG") #43
+
+#
+a = colnames(expression) #50282
+expression_epilepsy = expression[,colnames(expression) %in% grp$gene] #41
+
+#sample name from expression
+sample_name = expression[,1]
+data_select = data.frame(sample_name, expression_epilepsy)
+
+
+#combine
+data_c = merge(data_select, metaData[,c(1,6,9)], by = "sample_name") #49417
+
+
+# get three cell types
+
+data_f <- data_c %>%
+          filter(class_label %in% c("GABAergic", "Glutamatergic", "Non-neuronal"))  #47432
+
+
+data_f_w <- data_f %>%
+            gather(2:42, key = "Gene", value = "Value")
+
+#save
+
+write.csv(data_f_w, file = "CEG_expression_3celltypes.csv")
+
+
+##############################
+#################DEEG
+##############################
+
+grp = epilepsy %>%
+      dplyr::filter(grp == "DEEG") #86
+
+expression_epilepsy = expression[,colnames(expression) %in% grp$gene] #85
+
+#sample name from expression
+data_select = data.frame(sample_name, expression_epilepsy)
+
+
+#combine
+data_c = merge(data_select, metaData[,c(1,6,9)], by = "sample_name") #49417
+
+
+# get three cell types
+
+data_f <- data_c %>%
+          filter(class_label %in% c("GABAergic", "Glutamatergic", "Non-neuronal"))  #47432
+
+
+data_f_w <- data_f %>%
+            gather(2:86, key = "Gene", value = "Value")
+
+#save
+
+
+write.csv(data_f_w, file = "DEEG_expression_3celltypes.csv")
+
+
+##############################
+#################SRG
+##############################
+
+grp = epilepsy %>%
+      filter(grp == "SRG") #84
+
+expression_epilepsy = expression[,colnames(expression) %in% grp$gene] #79
+
+#sample name from expression
+data_select = data.frame(sample_name, expression_epilepsy)
+
+
+#combine
+data_c = merge(data_select, metaData[,c(1,6,9)], by = "sample_name") #49417
+
+
+# get three cell types
+
+data_f <- data_c %>%
+          filter(class_label %in% c("GABAergic", "Glutamatergic", "Non-neuronal"))  #47432
+
+
+data_f_w <- data_f %>%
+            gather(2:80, key = "Gene", value = "Value")
+
+#save
+write.csv(data_f_w, file = "SRG_expression_3celltypes.csv")
+
+```
+
+
+#################################################
+#######################combine datasets#########
+#################################################
+
+
+
+```{r, warning=FALSE}
+rm(list=ls())
+
+#group epilepsy
+CEG = readr::read_csv(file = "CEG_expression_3celltypes.csv")
+DEEG = readr::read_csv(file = "DEEG_expression_3celltypes.csv")
+SRG = readr::read_csv(file = "SRG_expression_3celltypes.csv")
+
+
+#mean gene value in each cluster
+CEG_ave = CEG[,-1] %>%
+          group_by(cluster_label, Gene, class_label) %>%
+          summarize(ave = mean(Value))
+CEG_ave$Group = rep("CEG", nrow(CEG_ave))
+
+DEEG_ave = DEEG[,-1] %>%
+          group_by(cluster_label, Gene, class_label) %>%
+          summarize(ave = mean(Value))
+DEEG_ave$Group = rep("DEEG", nrow(DEEG_ave))
+
+SRG_ave = SRG[,-1] %>%
+          group_by(cluster_label, Gene, class_label) %>%
+          summarize(ave = mean(Value))
+SRG_ave$Group = rep("SRG", nrow(SRG_ave))
+
+dat_ave = data.frame(rbind(CEG_ave, DEEG_ave, SRG_ave))
+
+write.csv(dat_ave, file = "./sc_expression.csv")
+```
+
+
+#################################################
+#######################plot#########
+#################################################
+
+##download and sort by "group and gene"
+
+```{r}
+set.seed(2023.1)
+data=readr::read_csv(file = "./sc_expression.csv")
+
+data = data.frame(data[,-1])
+
+
+#wide format
+data_w = data[,-c(5:8)] %>%
+        spread(Gene, ave)
+
+
+data_w[data_w == 0] <- NA
+data_w = na.omit(data_w)
+
+gene = colnames(data_w)[-c(1:2)]
+cluster = data_w[,1]
+class = data.frame(data_w$class_label)
+names(class) = "class_label"
+
+data_w2 = data_w[,-c(1:2)]
+data_w2 = t(data_w2)
+colnames(data_w2) = data_w$cluster_label
+
+group = unique(data[,c(2,5)])
+
+#prepare data
+heat = as.matrix(data_w2)
+heat = log2(heat)
+
+#set color scheme and choose breaks
+
+myCol <- colorRamp2(c(min(heat), median(heat), max(heat)), c( "#09f7fc","#eef2d3", "#ff0509"))
+
+
+#create annotation: gene labels
+
+genelabels <- rowAnnotation(
+              Genes = anno_mark(
+              at = seq(1, nrow(heat), 1), 
+              labels = group$Gene[seq(1, nrow(heat), 1)], 
+              labels_gp = gpar(fontsize = 2.3), 
+              padding = 0.5),
+              width = unit(1.0, 'cm')) 
+
+
+#top-annotation
+ha1 = HeatmapAnnotation(Cell.type = class$class_label, 
+                        col = list(Cell.type = c("GABAergic" = "#5ab4ac", "Glutamatergic" = "#f1a340", "Non-neuronal" = "gray")), 
+                        annotation_name_side = "right", 
+                        annotation_label = "Cell type", 
+                        annotation_legend_param = list(
+                                 title = "Cell type", 
+                                 title_gp = gpar(fontsize = 9),
+                                 labels = c("GABAergic", "Glutamatergic", "Non-neuronal"),
+                                 labels_gp = gpar(fontsize = 8),
+                                 legend_height = unit(2, "cm"),
+                                 legend_width = unit(0.5, "cm")
+                                  ))
+
+
+# clusters
+
+row_dend = dendsort(hclust(dist(heat)))
+col_dend = dendsort(hclust(dist(t(heat))))
+
+# creat heatmap object
+ht_list = Heatmap(heat,
+          col = myCol,
+          name = "Expression",
+          row_gap = unit(1, "mm"), 
+          column_gap = unit(1, "mm"),
+          rect_gp = gpar(col= "white"), 
+          # row (gene) parameters
+          row_title = NULL,
+          cluster_rows = TRUE, #subject to change
+          show_row_dend = TRUE,
+          show_row_names = TRUE,
+          column_title = NULL,
+          cluster_columns = col_dend,
+          show_column_dend = TRUE,
+          show_column_names = TRUE,
+          column_names_gp = gpar(fontsize = 7),
+          clustering_method_rows = 'ward.D2',
+          clustering_method_columns = 'ward.D2',
+          show_heatmap_legend = TRUE,
+          heatmap_legend_param = list(
+                                 title = "Expression", 
+                                 at = c(min(heat), median(heat), max(heat)), 
+                                 title_gp = gpar(fontsize = 9),
+                                 labels = c("low", "median", "high"),
+                                 labels_gp = gpar(fontsize = 8),
+                                 legend_height = unit(0.5, "cm"),
+                                 legend_width = unit(2, "cm"),
+                                 direction = "horizontal"
+                                  ),
+          top_annotation = ha1
+          )+
+          Heatmap(group$Group, 
+                 #col = c('#ffb60f',"#1f78b4", "#D95F02",'#c13832', "#8dd3c7", '#673bb8'), 
+                 col = c('#ffb60f','#c13832', '#673bb8'),
+                 name = "Group",
+                 width = unit(4, "mm"),
+                 show_column_names = FALSE,
+                 show_heatmap_legend = TRUE,
+                 heatmap_legend_param = list(
+                                       title = "Group",
+                                       title_gp = gpar(fontsize = 9),
+                                       #labels = c("CEG", "DEEG", "SRG"),
+                                       labels_gp = gpar(fontsize = 8),
+                                       legend_height = unit(2, "cm"),
+                                       legend_width = unit(0.5, "cm")
+                                       )
+        )
+
+png("./plot/sc_heat_clusteredrow.png", width =6.8, height = 6.8, units="in", res = 300)
+
+draw(ht_list,  main_heatmap = "Expression",  merge_legend = TRUE, heatmap_legend_side = "right", annotation_legend_side = "right")
+dev.off()
+
+```
+
+
+# calculate cluster mean values
+
+```{r}
+rm(list=ls())
+data=readr::read_csv(file = "./sc_expression.csv")
+
+data = data.frame(data[,-1])
+#wide format
+data_w = data[,-c(5:8)] %>%
+            spread(Gene, ave)
+
+data_w[data_w == 0] <- NA
+data_w = na.omit(data_w)
+
+data_l <- data_w %>%
+          gather(3:ncol(data_w), key = gene, value = expression)
+
+group = unique(data[,c(2,5)])
+names(group) = c("gene", "Group")
+
+data_all <- left_join(data_l, group)
+
+
+ave = data_all %>%
+      group_by(cluster_label,Group) %>%
+      summarise(group_mean = mean(expression)) 
+
+unique(ave$cluster_label)
+
+ave$cluster_label = factor(ave$cluster_label, levels = c("Exc L3 RORB CARTPT", "Exc L3-4 RORB FOLH1B", "Exc L3-4 RORB PRSS12", "Exc L3-4 RORB SEMA6D", "Exc L2-3 LINC00507 RPL9P17", "Exc L2-4 RORB GRIK1", "Exc L3 LINC00507 PSRC1", "Exc L3-5 RORB CMAHP", "Exc L4-5 RORB LINC01474", "Exc L4-5 RORB HNRNPA1P46", "Exc L5 RORB SNHG7", "Exc L6 THEMIS LINC00343", "Exc L4-5 RORB LCN15", "Exc L4-5 RORB RPL31P31", "Exc L5 RORB LINC01202", "Exc L3-5 THEMIS ELOF1", "Exc L4 RORB BHLHE22", "Exc L6 FEZF2 FAM95C", "Exc L6 FEZF2 VWA2", "Exc L6 FEZF2 CPZ", "Exc L5-6 THEMIS GPR21", "Exc L5-6 THEMIS IL7R", "Exc L5-6 THEMIS TMEM233", "Exc L6 THEMIS EGR3",  "Exc L6 FEZF2 KRT17", "Exc L5-6 FEZF2 MYBPHL", "Inh L2-4 PVALB C8orf4", "Inh L5 PVALB CNTNAP3P2", "Inh L1-3 PVALB WFDC2", "Inh L5-6 PVALB STON2", "Inh L3-4 PVALB HOMER3", "Inh L3-5 SST MAFB", "Inh L4-6 SST MTHFD2P6", "Inh L1 LAMP5 NDNF", "Inh L1-4 LAMP5 DUSP4", "Inh L5-6 LAMP5 SFTA3",  "Inh L1-3 VIP GGH", "Inh L2-6 VIP VIP", "Inh L1-3 VIP ZNF322P1", "Inh L3 VIP CBLN1" , "Inh L1-3 VIP SSTR1", "Inh L1 ADARB2 ADAM33", "Inh L1 SST CXCL14", "Inh L1-5 VIP KCNJ2", "Inh L1-6 VIP PENK", "Astro L1-6 FGFR3 ETNPPL", "OPC L1-6 MYT1", "Oligo L4-6 OPALIN", "Micro L1-6 C1QC"))
+
+                                                                              
+
+
+f = ggplot(data = ave, aes(x = cluster_label, y = group_mean, group = Group)) +
+    geom_bar(stat ="identity", position = position_dodge(), aes(fill = Group)) +
+    scale_color_manual(values = c('#ffb60f','#c13832','#673bb8')) +
+    scale_fill_manual(values = c('#ffb60f','#c13832','#673bb8')) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.background = element_blank(),
+           axis.line = element_line(colour = "black",size=0.5),
+           axis.ticks = element_line(colour="black",size =0.5),
+           axis.title.x = element_blank(),
+           axis.text.x = element_blank(),
+           legend.position = "none",
+           axis.text=element_text(size=4),
+           axis.title=element_text(size=9)) 
+      ylab("Expression level")
+
+ggsave(file = "./plot/sc_mean_cluster.png",width = 6, height = 2.5)  
+    
+
+# calculate group values
+
+
+
+ave = data %>%
+      group_by(class_label,Gene, Group) %>%
+      summarise(group_mean = mean(ave), n= n(), sd = sd(group_mean),sem = sd/sqrt(n))  %>%
+      group_by(class_label,Group) %>%
+      summarise(group_mean2 = mean(group_mean),  n= n(), sd = sd(group_mean),sem = sd/sqrt(n))
+      
+
+unique(ave$class_label)
+
+ave$class_label = factor(ave$class_label, levels = c("GABAergic", "Glutamatergic", "Non-neuronal"))
+
+
+f = ggplot(data = ave, aes(x = class_label, y = group_mean2, group = Group)) +
+    geom_errorbar(aes(ymin = group_mean2-sem, ymax = group_mean2+sem), position = position_dodge(), color = "gray") +
+    geom_bar(stat ="identity", position = position_dodge(), aes(fill = Group)) +
+    scale_color_manual(values = c('#ffb60f','#c13832','#673bb8')) +
+    scale_fill_manual(values = c('#ffb60f','#c13832','#673bb8')) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.background = element_blank(),
+           axis.line = element_line(colour = "black",size=0.5),
+           axis.ticks = element_line(colour="black",size =0.5),
+           axis.title.x = element_blank(),
+           legend.position = "none",
+           axis.text=element_text(size=8),
+           axis.title=element_text(size=9)) + 
+      ylab("Expression level")
+    
+      
+print(f)
+ggsave(file = "./plot/sc_mean_group.png",width = 3, height = 2.5)  
+
+
+#statistical analyses
+
+
+# stat_class
+ave = data %>%
+      group_by(Gene, Group, class_label) %>%
+      summarise(ave = mean(ave), total = n())
+#GABA
+gaba = ave %>%
+    filter (class_label == "GABAergic")
+pairwise.wilcox.test(gaba$ave,gaba$Group, 
+                 p.adjust.method = "BH")   
+
+##glu
+glu = ave%>%
+    filter (class_label == "Glutamatergic")
+pairwise.wilcox.test(glu$ave,glu$Group, 
+                 p.adjust.method = "BH") 
+
+##non
+non = ave %>%
+    filter (class_label == "Non-neuronal")
+pairwise.wilcox.test(non$ave,non$Group, 
+                 p.adjust.method = "BH") 
+
+
+# stat_grp
+ave = data %>%
+      group_by(Gene, Group, class_label) %>%
+      summarise(ave = mean(ave), total = n())
+
+#CEG
+CEG = ave %>%
+    filter (Group == "CEG")
+pairwise.wilcox.test(CEG$ave,CEG$class_label, 
+                 p.adjust.method = "BH") 
+
+
+#DEEG
+DEEG = ave %>%
+    filter (Group == "DEEG")
+pairwise.wilcox.test(DEEG$ave,DEEG$class_label, 
+                 p.adjust.method = "BH") 
+
+#SRG
+SRG = ave %>%
+    filter (Group == "SRG")
+pairwise.wilcox.test(SRG$ave,SRG$class_label, 
+                 p.adjust.method = "BH") 
+```
+
+
+```{r}
+sessionInfo()
+```
+
+
